@@ -12,7 +12,7 @@ import { transform } from 'lightningcss'
 import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 
-const ID = 'dsh-message-edit'
+const ID = '@yunyv/dsh-message-edit'
 
 /** Platform modules resolved from the loader module table at runtime. */
 const CLIENT_EXTERNALS = [
