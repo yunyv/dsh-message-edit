@@ -10,7 +10,7 @@
 import { build } from 'esbuild'
 import { transform } from 'lightningcss'
 import { readFile } from 'node:fs/promises'
-import { basename } from 'node:path'
+import { basename, relative } from 'node:path'
 
 const ID = '@yunyv/dsh-message-edit'
 
@@ -28,7 +28,7 @@ const cssModulePlugin = {
     build.onLoad({ filter: /\.module\.css$/ }, async (args) => {
       const source = await readFile(args.path)
       const { code, exports: cssExports } = transform({
-        filename: args.path,
+        filename: relative(process.cwd(), args.path),
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
