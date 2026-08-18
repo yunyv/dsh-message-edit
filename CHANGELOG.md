@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.8] - 2026-08-18
+
+### Fixed
+
+- Path-independent CSS module hashing: `scripts/build.mjs` passes the
+  project-relative filename to lightningcss, so class-name hashes no longer
+  depend on the checkout path and builds are byte-reproducible across machines
+  (CI gate: `git diff --exit-code` on built artifacts).
+
+## [0.2.7] - 2026-08-18
+
+### Added
+
+- Repo packaging pass: `LICENSE` (MIT), `CHANGELOG.md`, `CONTRIBUTING.md`,
+  bilingual README (`README.md` + `README.zh.md` + `README.i18n.yaml`
+  consistency record), CI workflow (typecheck + build + reproducible-build
+  gate), `.npmrc`, `.gitattributes`.
+- `package.json`: `engines`, `peerDependencies`, `publishConfig` (public
+  access), `files` (src + zh readme), `check` script, fuller keywords.
+
 ## [0.2.6] - 2026-08-18
 
 ### Fixed
