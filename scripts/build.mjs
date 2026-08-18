@@ -34,7 +34,8 @@ const cssModulePlugin = {
         minify: true,
       })
       const classMap = {}
-      for (const [local, exp] of Object.entries(cssExports ?? {})) classMap[local] = exp.name
+      for (const [local, exp] of Object.entries(cssExports ?? {})
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) classMap[local] = exp.name
       return {
         contents: [
           `const css = ${JSON.stringify(code.toString())};`,

@@ -44,7 +44,7 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
   tag.textContent = css;
   document.head.appendChild(tag);
 }
-var InlineMessageEdit_default = { "panel": "UVOEXq_panel", "title": "UVOEXq_title", "input": "UVOEXq_input", "picker": "UVOEXq_picker", "pickerItem": "UVOEXq_pickerItem", "pickerItemActive": "UVOEXq_pickerItemActive", "overlay": "UVOEXq_overlay", "footer": "UVOEXq_footer", "iconButton": "UVOEXq_iconButton" };
+var InlineMessageEdit_default = { "footer": "UVOEXq_footer", "iconButton": "UVOEXq_iconButton", "input": "UVOEXq_input", "overlay": "UVOEXq_overlay", "panel": "UVOEXq_panel", "picker": "UVOEXq_picker", "pickerItem": "UVOEXq_pickerItem", "pickerItemActive": "UVOEXq_pickerItemActive", "title": "UVOEXq_title" };
 
 // src/client/overlay.ts
 var BLOCK_TITLE = {
@@ -790,7 +790,7 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
   tag.textContent = css2;
   document.head.appendChild(tag);
 }
-var MessageEditHeader_default = { "rerollButton": "zgEACG_rerollButton", "iconButton": "zgEACG_iconButton", "counter": "zgEACG_counter", "root": "zgEACG_root" };
+var MessageEditHeader_default = { "counter": "zgEACG_counter", "iconButton": "zgEACG_iconButton", "rerollButton": "zgEACG_rerollButton", "root": "zgEACG_root" };
 
 // src/client/MessageEditHeader.tsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
@@ -883,7 +883,7 @@ if (typeof document !== "undefined" && document.querySelector("style[data-plugin
   tag.textContent = css3;
   document.head.appendChild(tag);
 }
-var MessageEditTimelineView_default = { "cascadeField": "b5lgga_cascadeField", "textarea": "b5lgga_textarea", "versionMain": "b5lgga_versionMain", "effectControls": "b5lgga_effectControls", "messageList": "b5lgga_messageList", "editor": "b5lgga_editor", "notice": "b5lgga_notice", "sectionHeading": "b5lgga_sectionHeading", "turnSection": "b5lgga_turnSection", "headerActions": "b5lgga_headerActions", "textButton": "b5lgga_textButton", "messageCard": "b5lgga_messageCard", "editorHint": "b5lgga_editorHint", "versionItem": "b5lgga_versionItem", "count": "b5lgga_count", "effectDepth": "b5lgga_effectDepth", "subtitle": "b5lgga_subtitle", "turnTitle": "b5lgga_turnTitle", "intro": "b5lgga_intro", "messageText": "b5lgga_messageText", "status": "b5lgga_status", "turnList": "b5lgga_turnList", "effectButtons": "b5lgga_effectButtons", "primaryButton": "b5lgga_primaryButton", "versionsPanel": "b5lgga_versionsPanel", "turnPreview": "b5lgga_turnPreview", "versionDiff": "b5lgga_versionDiff", "messageTime": "b5lgga_messageTime", "versionButton": "b5lgga_versionButton", "messageHeader": "b5lgga_messageHeader", "editorActions": "b5lgga_editorActions", "versionMeta": "b5lgga_versionMeta", "versionList": "b5lgga_versionList", "kindBadge": "b5lgga_kindBadge", "select": "b5lgga_select", "title": "b5lgga_title", "error": "b5lgga_error", "columns": "b5lgga_columns", "pageHeader": "b5lgga_pageHeader", "versionLine": "b5lgga_versionLine", "secondaryButton": "b5lgga_secondaryButton", "root": "b5lgga_root", "versionDot": "b5lgga_versionDot", "versionTitle": "b5lgga_versionTitle", "currentBadge": "b5lgga_currentBadge", "pathBadge": "b5lgga_pathBadge", "empty": "b5lgga_empty", "turnHeader": "b5lgga_turnHeader", "turnsPanel": "b5lgga_turnsPanel" };
+var MessageEditTimelineView_default = { "cascadeField": "b5lgga_cascadeField", "columns": "b5lgga_columns", "count": "b5lgga_count", "currentBadge": "b5lgga_currentBadge", "editor": "b5lgga_editor", "editorActions": "b5lgga_editorActions", "editorHint": "b5lgga_editorHint", "effectButtons": "b5lgga_effectButtons", "effectControls": "b5lgga_effectControls", "effectDepth": "b5lgga_effectDepth", "empty": "b5lgga_empty", "error": "b5lgga_error", "headerActions": "b5lgga_headerActions", "intro": "b5lgga_intro", "kindBadge": "b5lgga_kindBadge", "messageCard": "b5lgga_messageCard", "messageHeader": "b5lgga_messageHeader", "messageList": "b5lgga_messageList", "messageText": "b5lgga_messageText", "messageTime": "b5lgga_messageTime", "notice": "b5lgga_notice", "pageHeader": "b5lgga_pageHeader", "pathBadge": "b5lgga_pathBadge", "primaryButton": "b5lgga_primaryButton", "root": "b5lgga_root", "secondaryButton": "b5lgga_secondaryButton", "sectionHeading": "b5lgga_sectionHeading", "select": "b5lgga_select", "status": "b5lgga_status", "subtitle": "b5lgga_subtitle", "textButton": "b5lgga_textButton", "textarea": "b5lgga_textarea", "title": "b5lgga_title", "turnHeader": "b5lgga_turnHeader", "turnList": "b5lgga_turnList", "turnPreview": "b5lgga_turnPreview", "turnSection": "b5lgga_turnSection", "turnTitle": "b5lgga_turnTitle", "turnsPanel": "b5lgga_turnsPanel", "versionButton": "b5lgga_versionButton", "versionDiff": "b5lgga_versionDiff", "versionDot": "b5lgga_versionDot", "versionItem": "b5lgga_versionItem", "versionLine": "b5lgga_versionLine", "versionList": "b5lgga_versionList", "versionMain": "b5lgga_versionMain", "versionMeta": "b5lgga_versionMeta", "versionTitle": "b5lgga_versionTitle", "versionsPanel": "b5lgga_versionsPanel" };
 
 // src/client/MessageEditTimelineView.tsx
 var import_jsx_runtime3 = require("react/jsx-runtime");

@@ -1,71 +1,124 @@
 # DSH Message Edit
 
 [![npm version](https://img.shields.io/npm/v/@yunyv/dsh-message-edit)](https://www.npmjs.com/package/@yunyv/dsh-message-edit)
+[![npm downloads](https://img.shields.io/npm/dm/@yunyv/dsh-message-edit)](https://www.npmjs.com/package/@yunyv/dsh-message-edit)
 [![license](https://img.shields.io/npm/l/@yunyv/dsh-message-edit)](LICENSE)
+[![CI](https://github.com/yunyv/dsh-message-edit/actions/workflows/ci.yml/badge.svg)](https://github.com/yunyv/dsh-message-edit/actions/workflows/ci.yml)
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
+Event-sourced **message editing, rerolling, retrying, and version navigation**
+for [DeepSeek Harness](https://github.com/deepseek-ai/dsh). The plugin never
+rewrites history events and never touches the DSH engine internals: every
+edit, reroll, or retry forks a new session version before the target turn,
+while the original session is always preserved and can be switched back to at
+any time.
 
-## 兼容性
+## Compatibility
 
-- 兼容 DSH **0.1.0-rc.6**、**0.1.0-rc.7** 及更新版本。
-- 版本事件（`message-edit/version`）在事件信封上携带 `ignorable: true` 标记：较新 DSH 构建遇到未知事件类型时跳过而非拒绝整个日志，确保会话历史在版本升级后仍可正常加载。
+- Works with DSH **0.1.0-rc.6**, **0.1.0-rc.7**, and newer.
+- Version events (`message-edit/version`) carry `ignorable: true` on the event
+  envelope: newer DSH builds skip unknown event types marked ignorable instead
+  of refusing the entire log, so session history stays loadable across DSH
+  upgrades.
 
-## 功能
+## Features
 
-- **编辑消息**：可编辑已落定的用户文本、`assistant.reasoning` 思考块与 `assistant.response` 回复文本。
-- **重生成**：从最后一条已落定助手回复所属回合之前分支，使用原用户输入重新生成。
-- **重试任意回合**：在 Timeline 中选择任意历史回合重新执行。
-- **级联策略**：
-  - `truncate`（默认）：只重新执行目标输入，删除该点之后的旧后续。
-  - `preserve`：保留后续用户输入，并在新分支中依次重新执行；助手输出与工具链全部重新生成。
-- **版本切换**：会话标题栏的 `←` 撤销当前原子效果，`→` 重施加最新直接子效果；Timeline 展示完整已知分支树、操作时间、编辑前后内容与当前版本。
-- **Timeline 标签页**：注册到 `conversation.view`，`order: 15`，位于 Trajectory（10）与 Prompt Studio（20）之间。
+- **Edit messages**: settled user text, `assistant.reasoning` thinking blocks,
+  and `assistant.response` reply text are all editable.
+- **Rerun**: fork before the turn of the last settled assistant reply and
+  regenerate from the original user input.
+- **Retry any turn**: pick any historical turn in the Timeline and re-execute it.
+- **Cascade policies**:
+  - `truncate` (default): re-execute only the target input, dropping the old
+    tail after that point.
+  - `preserve`: keep the following user inputs and re-execute them in order on
+    the new branch; assistant outputs and tool chains are fully regenerated.
+- **Version switching**: `←` in the session title bar undoes the current atomic
+  effect, `→` re-applies the latest direct child effect; the Timeline shows the
+  full known branch tree, operation time, before/after content, and the
+  current version.
+- **Timeline tab**: registered on `conversation.view`, `order: 15`, between
+  Trajectory (10) and Prompt Studio (20).
 
-## 安装
+## Installation
 
 ```bash
 # npm
 dsh plugin --profile web add @yunyv/dsh-message-edit
 
-# 或 GitHub
+# or GitHub
 dsh plugin --profile web add github:yunyv/dsh-message-edit
 
-# 或本地开发（link 模式）
+# or local development (link mode)
 dsh plugin --profile web add -w link:/path/to/dsh-message-edit
 ```
 
-`dsh plugin` 是 pnpm 转发器：`add` 后会自动识别 `dsh.bundle` 声明并把插件收编进 profile 的 `dsh.profile.bundles`，重启 dsh 即生效。
+`dsh plugin` is a pnpm forwarder: after `add`, the `dsh.bundle` declaration is
+recognized and the plugin is adopted into the profile's `dsh.profile.bundles`;
+restart dsh for it to take effect.
 
-## 设计
+## Design
 
-### 时间可组合性
+### Temporal composition
 
-插件把**完整回合**作为效果原子。目标回合的 `turn/start`、模型请求、工具调用、工具结果与 `turn/end` 不会被局部复制后拼接；新版本从该回合之前的闭合边界分支：
+The plugin treats a **complete turn** as the atomic effect. The target turn's
+`turn/start`, model request, tool calls, tool results, and `turn/end` are never
+partially copied and spliced; a new version forks from a closed boundary before
+that turn:
 
-1. 用户消息编辑、Reroll 与 Retry：回退整个目标回合，再把目标用户输入作为新回合交给 Agent。
-2. 助手块编辑：回退整个目标回合，以原用户输入和编辑后的助手内容构造一个新的完整闭合回合；原工具链不进入新版本。选择 `preserve` 时，后续用户输入再依次交给 Agent，产生新的完整工具链。
-3. 每个版本都追加一个不可拆分的 `message-edit/version` 效果对：`effect` 记录正向效果，`inverse` 记录恢复目标。父版本链自动导出组合逆；恢复不是删除事件，而是沿逆链切换到仍然存在的版本。
-4. 消息历史变换彼此不交换，因此撤销遵循 LIFO：一次只撤销当前原子效果并保留更早效果；各后继分支始终保留，可从父版本重新施加。
+1. User-message edit, Reroll, and Retry: roll back the whole target turn, then
+   hand the target user input to the Agent as a new turn.
+2. Assistant-block edit: roll back the whole target turn and construct a new
+   complete closed turn from the original user input plus the edited assistant
+   content; the original tool chain does not enter the new version. With
+   `preserve`, the following user inputs are re-executed in order, producing a
+   fresh tool chain.
+3. Each version appends an inseparable `message-edit/version` effect pair:
+   `effect` records the forward effect, `inverse` records the restore target.
+   The parent chain derives composite inverses automatically; restoring is not
+   event deletion but switching along the inverse chain to a version that still
+   exists.
+4. Message-history transforms do not commute, so undo follows LIFO: only the
+   current atomic effect is undone at a time, keeping earlier effects; every
+   successor branch is retained and can be re-applied from the parent version.
 
-### 分支与 Agent 接线
+### Branching and Agent wiring
 
-1. 在来源 Agent 的 `runMaintenance()` 内，从已闭合边界取得不可变 seed；第一回合之前使用空 seed。
-2. 用本地等价的纯事件构造器把版本效果对与可选手工助手回合加入 seed，再调用 `ctx.agents.create({ seed, meta })`。Session 在 Agent 构造前一次性验证完整 seed；任何一步失败都会由 AgentFactory 的结构性逆撤销，外部观察者看不到半成品 Session，Agent 的回合计数也直接从完整历史初始化。
-3. 发布后调用 `ctx.sessions.flush()`，在 HTTP 操作成功前建立耐久性屏障。
-4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；操作失败时按相反顺序组合恢复。随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
+1. Inside the source Agent's `runMaintenance()`, take an immutable seed from
+   the closed boundary; before the first turn, use an empty seed.
+2. Append the version effect pair and an optional manual assistant turn with
+   local pure event constructors, then call `ctx.agents.create({ seed, meta })`.
+   The Session validates the whole seed once before Agent construction; any
+   failure is structurally reverted by AgentFactory, so observers never see a
+   half-built Session and the Agent's turn count initializes directly from the
+   full history.
+3. Call `ctx.sessions.flush()` after publishing, establishing a durability
+   barrier before the HTTP operation succeeds.
+4. Workspace attachment and child-Agent lifecycle each return an atomic
+   inverse; on failure they are composed in reverse order. The child input is
+   then queued via `child.agent.followup()`.
 
-此路径不接触 `ReactLoopAgent`、AgentLoop 私有方法或 apiproxy 的收窄 fork RPC；分支 seed 仍由同一 Session 公共事件契约验证。
+This path never touches `ReactLoopAgent`, AgentLoop private methods, or
+apiproxy's narrowed fork RPC; branch seeds still pass through the same public
+Session event contract.
 
-### 空间可组合性
+### Spatial composition
 
-- Host 只依赖公开的 `sessions`、`agents`、`sessionPersistence`、`sessionQuery`、`workspaceRegistry` 与 `webServer` 服务。
-- Browser 只通过 `slots`、`conversation`、`connection` 与 runtime `sessions` 服务组合。
-- Timeline 与标题栏共享一个按 `sessionId` 建立的值级 Snapshot source；控制器反应式订阅当前 Session 的闭合回合值与 Session 列表中的谱系值，Session 身份替换时重新绑定，不缓存旧 Session 对象。
-- 新版本导航等待 runtime Session 列表发布对应 ID 后再执行 `ctx.sessions.open()`，依赖可用性变化直接驱动导航。
+- Host depends only on the public `sessions`, `agents`, `sessionPersistence`,
+  `sessionQuery`, `workspaceRegistry`, and `webServer` services.
+- Browser composes only `slots`, `conversation`, `connection`, and runtime
+  `sessions` services.
+- The Timeline and title bar share a value-level Snapshot source keyed by
+  `sessionId`; the controller reactively subscribes to the current Session's
+  closed turns and the lineage values in the Session list, rebinding on
+  Session identity replacement without caching stale Session objects.
+- Version navigation waits for the runtime Session list to publish the
+  matching ID before `ctx.sessions.open()`; availability changes drive
+  navigation directly.
 
-## 数据模型
+## Data model
 
-每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件：
+Each plugin version contains one `message-edit/version` event in its own
+non-inherited suffix:
 
 ```ts
 interface MessageEditVersionEvent {
@@ -88,7 +141,13 @@ interface MessageEditVersionEvent {
 }
 ```
 
-会话头的 `parentSession` 构成版本树，且必须与事件中的 `inverse.sessionId` 一致；`seedLength` 区分当前版本自己的元数据与从祖先继承的同名事件。Timeline 通过 `ctx.sessionQuery.traceSession()` 和 `readSession()` 生成完整值级投影，并由原子逆链导出 `undoStack` 与直接 `redoSessionIds`。旧版平面事件仍可读取，并在投影时规范化为同一效果对。
+The session header's `parentSession` builds the version tree and must match
+`inverse.sessionId`; `seedLength` separates the current version's own metadata
+from same-named events inherited from ancestors. The Timeline derives the full
+value-level projection via `ctx.sessionQuery.traceSession()` and
+`readSession()`, and exports `undoStack` and direct `redoSessionIds` from the
+atomic inverse chain. Legacy flat events remain readable and normalize to the
+same effect pair in the projection.
 
 ## UI
 
@@ -98,38 +157,50 @@ interface MessageEditVersionEvent {
   - `label: Timeline`
 - `conversation.session.header.actions`
   - `id: message-edit-controls`
-  - 直接父效果撤销、直接子效果重施加、效果链计数、最后回复重生成
+  - undo the direct parent effect, re-apply the latest direct child effect,
+    effect-chain count, rerun the last reply
 - `conversation.chat.assistant-actions`
   - `id: message-edit-assistant-actions`
-  - 助手消息行内的编辑 / 重试按钮，走官方 per-message action slot（`messageId` 派发）；用户消息无对应 slot，仍由 DOM 注入补齐
+  - per-message edit / retry buttons riding the official per-message action
+    slot (`messageId` dispatch); user messages have no such slot and are
+    covered by DOM injection
 
-组件使用 CSS Modules 与 `--dsw-*` 语义 token，不引入 UI 库。所有产品文案为中文，代码注释为英文。
+Components use CSS Modules and `--dsw-*` semantic tokens with no UI library.
+Product copy is Chinese; code comments are English.
 
-## HTTP 接口
+## HTTP API
 
-- `GET /message-edit?sessionId=<id>`：读取可编辑消息、可重试回合与完整版本树。
-- `POST /message-edit`：执行 `edit`、`reroll` 或 `retry`，返回已发布的新 Session ID。
+- `GET /message-edit?sessionId=<id>`: readable messages, retryable turns, and
+  the full version tree.
+- `POST /message-edit`: run `edit`, `reroll`, or `retry`; returns the newly
+  published Session ID.
 
-## 构建
+## Build
 
 ```bash
 npm install
 npm run build
 ```
 
-源码位于 `src/`（Host 在 `src/index.ts`，Browser 在 `src/client/`），构建脚本为 `scripts/build.mjs`，基于 esbuild + lightningcss：
+Source lives in `src/` (host at `src/index.ts`, browser at `src/client/`); the
+build script is `scripts/build.mjs` on top of esbuild + lightningcss:
 
-- Host：`src/index.ts` → `index.mjs`（ESM，`@deepseek-ai/*` 外部化）
-- Browser：`src/client/index.ts` → `client.js` + `client.js.map`（`window.__ModuleLoader__.load` 闭包工厂，CSS Modules 由 lightningcss 编译为哈希类名映射 + 幂等 `<style data-plugin>` 注入）
+- Host: `src/index.ts` → `index.mjs` (ESM, `@deepseek-ai/*` external)
+- Browser: `src/client/index.ts` → `client.js` + `client.js.map`
+  (`window.__ModuleLoader__.load` closure factory; CSS Modules are compiled by
+  lightningcss into a hashed class map plus idempotent `<style data-plugin>`
+  injection)
 
-`npm run typecheck`（`tsc --noEmit`）校验类型；`npm run build` 同时产出两个半区。
+`npm run typecheck` (`tsc --noEmit`) validates types; `npm run build` emits
+both halves.
 
-## 范围边界
+## Scope
 
-- 不原地改写 Session 事件；历史是 append-only、deep-frozen。
-- 不联动恢复或修改工作区文件、命令外部效果与既有产物。
-- 不修改 DSH 引擎、apiproxy 或官方 UI 包。
+- Never rewrites Session events; history is append-only and deep-frozen.
+- Does not restore or modify workspace files, external command effects, or
+  existing artifacts.
+- Does not modify the DSH engine, apiproxy, or official UI packages.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
