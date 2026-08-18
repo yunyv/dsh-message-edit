@@ -1,0 +1,841 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { SessionId, type Session, type SessionEvent, type SessionHeader, type UserMessage } from '@deepseek-ai/dsh-session'
+import type { SessionLineageNode, SessionRecord } from '@deepseek-ai/dsh-session-query'
+import type { Workspace } from '@deepseek-ai/dsh-workspace'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import {
+  MESSAGE_EDIT_PATH,
+  MESSAGE_EDIT_VERSION_SCHEMA,
+  MESSAGE_EDIT_VIEW_ORDER,
+  type CascadePolicy,
+  type EditableBlockKind,
+  type EditableMessageBlock,
+  type MessageEditOperation,
+  type MessageEditOperationResult,
+  type MessageEditTimeline,
+  type MessageEditVersionEvent,
+  type RetryableTurn,
+  type VersionSummary,
+} from './shared.ts'
+
+export { MESSAGE_EDIT_PATH, MESSAGE_EDIT_VERSION_SCHEMA, MESSAGE_EDIT_VIEW_ORDER }
+
+/** Stable Cordis plugin name. */
+export const name = 'message-edit'
+
+/** Public services used by the branch transaction and timeline projection. */
+export const inject = [
+  'sessions',
+  'agents',
+  'sessionPersistence',
+  'sessionQuery',
+  'workspaceRegistry',
+  'webServer',
+]
+
+// ---------------------------------------------------------------------------
+// Pure event construction
+// ---------------------------------------------------------------------------
+
+interface VersionEffect {
+  id: string
+  operation: 'edit' | 'reroll' | 'retry'
+  cascade: CascadePolicy
+  targetTurn: number
+  targetEventSeq: number
+  targetBlockIndex?: number
+  blockKind?: EditableBlockKind
+  before?: string
+  after?: string
+}
+
+interface VersionPlan {
+  boundary: number
+  version: MessageEditVersionEvent
+  manualTurn?: ManualTurn
+  queuedUsers: UserMessage[]
+}
+
+interface ManualTurn {
+  turn: number
+  user: UserMessage
+  assistant: AssistantMessage
+}
+
+interface AssistantMessage {
+  id: string
+  role: 'assistant'
+  content: readonly ContentBlock[]
+  source: { kind: 'model'; provider: string; model: string }
+}
+
+interface OpenTurn {
+  turn: number
+  startSeq: number
+  user?: SessionEvent
+  assistants: SessionEvent[]
+}
+
+interface ClosedTurn extends OpenTurn {
+  endSeq: number
+}
+
+function pairVersionEffect(sourceSessionId: string, effect: Omit<VersionEffect, 'id'>): MessageEditVersionEvent {
+  return {
+    schemaVersion: MESSAGE_EDIT_VERSION_SCHEMA,
+    effect: {
+      ...effect,
+      id: crypto.randomUUID(),
+    },
+    inverse: {
+      kind: 'restore-version',
+      sessionId: sourceSessionId,
+    },
+  }
+}
+
+function isTextualBlock(block: unknown): block is { type: 'text' | 'reasoning'; text: string } {
+  const candidate = block as { type?: unknown }
+  return candidate?.type === 'text' || candidate?.type === 'reasoning'
+}
+
+function userText(message: UserMessage): string {
+  return message.content
+    .filter((block) => (block as { type?: unknown }).type === 'text')
+    .map((block) => (block as { text: string }).text)
+    .join('\n')
+}
+
+function cloneUser(message: UserMessage, content: readonly ContentBlock[] = structuredClone(message.content)): UserMessage {
+  return Object.freeze({
+    id: crypto.randomUUID(),
+    role: 'user',
+    content: Object.freeze(content),
+    source: Object.freeze({ kind: 'user' }),
+  }) as unknown as UserMessage
+}
+
+function replaceTextBlock(content: readonly ContentBlock[], blockIndex: number, text: string): ContentBlock[] {
+  const block = content[blockIndex]
+  if (!isTextualBlock(block)) throw new Error('所选内容块不是可编辑文本。')
+  return content.map((candidate, index) =>
+    index === blockIndex ? { ...candidate, text } : structuredClone(candidate),
+  )
+}
+
+/** Fold complete turn brackets; an open tail is deliberately absent. */
+function closedTurns(events: readonly SessionEvent[]): ClosedTurn[] {
+  const result: ClosedTurn[] = []
+  let current: OpenTurn | undefined
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      current = { turn: event.data.turn, startSeq: event.seq, assistants: [] }
+      continue
+    }
+    if (current === undefined) continue
+    if (event.type === 'user/message' && current.user === undefined && event.data.source.kind === 'user') {
+      current.user = event
+      continue
+    }
+    if (event.type === 'assistant/message' && event.data.turn === current.turn) {
+      current.assistants.push(event)
+      continue
+    }
+    if (event.type === 'turn/end' && event.data.turn === current.turn) {
+      result.push({ ...current, endSeq: event.seq })
+      current = undefined
+    }
+  }
+  return result
+}
+
+function editableMessages(turns: ClosedTurn[]): EditableMessageBlock[] {
+  const result: EditableMessageBlock[] = []
+  for (const turn of turns) {
+    if (turn.user !== undefined) {
+      for (const [blockIndex, block] of (turn.user.data as UserMessage).content.entries()) {
+        if ((block as { type?: unknown }).type !== 'text') continue
+        result.push({
+          key: `${String(turn.user.seq)}:${String(blockIndex)}`,
+          turn: turn.turn,
+          eventSeq: turn.user.seq,
+          blockIndex,
+          kind: 'user',
+          text: (block as { text: string }).text,
+          time: turn.user.time,
+        })
+      }
+    }
+    for (const event of turn.assistants) {
+      const message = (event.data as { message: AssistantMessage }).message
+      for (const [blockIndex, block] of message.content.entries()) {
+        if (!isTextualBlock(block)) continue
+        result.push({
+          key: `${String(event.seq)}:${String(blockIndex)}`,
+          turn: turn.turn,
+          eventSeq: event.seq,
+          blockIndex,
+          kind: block.type === 'reasoning' ? 'assistant.reasoning' : 'assistant.response',
+          text: block.text,
+          time: event.time,
+          messageId: message.id,
+        })
+      }
+    }
+  }
+  return result
+}
+
+function retryableTurns(turns: ClosedTurn[]): RetryableTurn[] {
+  return turns.flatMap((turn) =>
+    turn.user === undefined
+      ? []
+      : [{
+          turn: turn.turn,
+          userEventSeq: turn.user.seq,
+          preview: userText(turn.user.data as UserMessage),
+          time: turn.user.time,
+        }],
+  )
+}
+
+function downstreamUsers(turns: ClosedTurn[], start: number): UserMessage[] {
+  return turns.slice(start).flatMap((turn) => (turn.user === undefined ? [] : [cloneUser(turn.user.data as UserMessage)]))
+}
+
+function assistantReplacement(event: SessionEvent, blockIndex: number, text: string): AssistantMessage {
+  const message = (event.data as { message: AssistantMessage }).message
+  const replaced = replaceTextBlock(message.content, blockIndex, text)
+    .filter((block) => (block as { type?: unknown }).type === 'text' || (block as { type?: unknown }).type === 'reasoning')
+  return Object.freeze({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    content: Object.freeze(replaced),
+    source: Object.freeze({
+      kind: 'model',
+      provider: message.source.provider,
+      model: message.source.model,
+    }),
+  }) as unknown as AssistantMessage
+}
+
+function editPlan(operation: Extract<MessageEditOperation, { action: 'edit' }>, turns: ClosedTurn[]): VersionPlan {
+  const turnIndex = turns.findIndex((turn) => operation.eventSeq > turn.startSeq && operation.eventSeq < turn.endSeq)
+  const turn = turns[turnIndex]
+  if (turn === undefined) throw new Error('所选消息不属于已落定回合。')
+  const event = turn.user?.seq === operation.eventSeq
+    ? turn.user
+    : turn.assistants.find((candidate) => candidate.seq === operation.eventSeq)
+  if (event === undefined) throw new Error('所选消息不存在或不可编辑。')
+  if (event.type === 'user/message') {
+    const before = (event.data as UserMessage).content[operation.blockIndex]
+    if ((before as { type?: unknown })?.type !== 'text') throw new Error('所选用户消息块不是文本。')
+    const edited = cloneUser(event.data as UserMessage, replaceTextBlock((event.data as UserMessage).content, operation.blockIndex, operation.text))
+    const later = operation.cascade === 'preserve' ? downstreamUsers(turns, turnIndex + 1) : []
+    return {
+      boundary: turn.startSeq - 1,
+      version: pairVersionEffect(operation.sessionId, {
+        operation: 'edit',
+        cascade: operation.cascade,
+        targetTurn: turn.turn,
+        targetEventSeq: event.seq,
+        targetBlockIndex: operation.blockIndex,
+        blockKind: 'user',
+        before: (before as { text: string }).text,
+        after: operation.text,
+      }),
+      queuedUsers: [edited, ...later],
+    }
+  }
+  const before = (event.data as { message: AssistantMessage }).message.content[operation.blockIndex]
+  if (!isTextualBlock(before)) throw new Error('所选助手消息块不是文本或思考。')
+  const blockKind: EditableBlockKind = before.type === 'reasoning' ? 'assistant.reasoning' : 'assistant.response'
+  if (turn.user === undefined) throw new Error('所选助手消息没有可重建的用户输入。')
+  return {
+    boundary: turn.startSeq - 1,
+    version: pairVersionEffect(operation.sessionId, {
+      operation: 'edit',
+      cascade: operation.cascade,
+      targetTurn: turn.turn,
+      targetEventSeq: event.seq,
+      targetBlockIndex: operation.blockIndex,
+      blockKind,
+      before: before.text,
+      after: operation.text,
+    }),
+    manualTurn: {
+      turn: turn.turn,
+      user: cloneUser(turn.user.data as UserMessage),
+      assistant: assistantReplacement(event, operation.blockIndex, operation.text),
+    },
+    queuedUsers: operation.cascade === 'preserve' ? downstreamUsers(turns, turnIndex + 1) : [],
+  }
+}
+
+function retryPlan(sessionId: string, turnNumber: number, cascade: CascadePolicy, turns: ClosedTurn[]): VersionPlan {
+  const turnIndex = turns.findIndex((turn) => turn.turn === turnNumber)
+  const turn = turns[turnIndex]
+  if (turn?.user === undefined) throw new Error('所选回合没有可重放的用户输入。')
+  return {
+    boundary: turn.startSeq - 1,
+    version: pairVersionEffect(sessionId, {
+      operation: 'retry',
+      cascade,
+      targetTurn: turn.turn,
+      targetEventSeq: turn.user.seq,
+    }),
+    queuedUsers: cascade === 'preserve' ? downstreamUsers(turns, turnIndex) : [cloneUser(turn.user.data as UserMessage)],
+  }
+}
+
+function rerollPlan(sessionId: string, turns: ClosedTurn[]): VersionPlan {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]
+    if (turn?.user === undefined) continue
+    const target = turn.assistants.findLast((event) =>
+      (event.data as { message: AssistantMessage }).message.content.some(isTextualBlock),
+    )
+    if (target === undefined) continue
+    return {
+      boundary: turn.startSeq - 1,
+      version: pairVersionEffect(sessionId, {
+        operation: 'reroll',
+        cascade: 'truncate',
+        targetTurn: turn.turn,
+        targetEventSeq: target.seq,
+      }),
+      queuedUsers: [cloneUser(turn.user.data as UserMessage)],
+    }
+  }
+  throw new Error('当前会话没有可重生成的已落定助手回复。')
+}
+
+function planOperation(operation: MessageEditOperation, events: readonly SessionEvent[]): VersionPlan {
+  const turns = closedTurns(events)
+  switch (operation.action) {
+    case 'edit': return editPlan(operation, turns)
+    case 'reroll': return rerollPlan(operation.sessionId, turns)
+    case 'retry': return retryPlan(operation.sessionId, operation.turn, operation.cascade, turns)
+  }
+}
+
+function agentOptions(events: readonly SessionEvent[], fallback?: AgentOptions): AgentOptions {
+  const config = events.findLast((event) => event.type === 'request/header')?.data.header.config as
+    | { provider?: string; model?: string; maxTokens?: number }
+    | undefined
+  const provider = config?.provider ?? fallback?.provider
+  const model = config?.model ?? fallback?.model
+  if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) {
+    throw new Error('无法从会话历史解析模型路由。')
+  }
+  const maxTokens = config?.maxTokens ?? fallback?.maxTokens
+  return {
+    provider,
+    model,
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Source-agent borrow
+// ---------------------------------------------------------------------------
+
+async function withSourceAgent<T>(
+  ctx: Context,
+  sessionId: SessionId,
+  operation: (agent: Agent) => Promise<T>,
+): Promise<T> {
+  let handle: AgentHandle | undefined
+  let agent = ctx.agents.get(sessionId)
+  if (agent === undefined) {
+    const snapshot = await ctx.sessionQuery.readSession(sessionId)
+    handle = await ctx.agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: agentOptions(snapshot.events),
+    })
+    agent = handle.agent
+  }
+  try {
+    return await agent.runMaintenance(async () => operation(agent))
+  } finally {
+    await handle?.dispose()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Seed construction
+// ---------------------------------------------------------------------------
+
+function inheritedSeed(source: Session, boundary: number): SessionEvent[] {
+  if (boundary === -1) return []
+  const boundaryEvent = source.events[boundary]
+  if (boundary < 0 || boundaryEvent === undefined || boundaryEvent.seq !== boundary) {
+    throw new Error('分支边界不是连续会话事件。')
+  }
+  return source.events.slice(0, boundary + 1).map((event) =>
+    event.type === 'message-edit/version' ? { ...event, ignorable: true } : event,
+  )
+}
+
+/** Build seed envelopes locally; Session construction performs canonical validation and freezing. */
+function appendLogSeedEvent(events: SessionEvent[], type: string, data: unknown, ignorable?: boolean): void {
+  events.push({
+    type,
+    seq: events.length,
+    time: Date.now(),
+    data,
+    ...(ignorable === true ? { ignorable: true } : {}),
+  } as SessionEvent)
+}
+
+function appendSurfaceSeedEvent(
+  events: SessionEvent[],
+  type: string,
+  data: unknown,
+  intent: { surfaceOp: string; sourceEventSeqs?: number[] },
+): void {
+  events.push({
+    type,
+    seq: events.length,
+    time: Date.now(),
+    data,
+    surfaceOp: intent.surfaceOp,
+    ...(intent.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: intent.sourceEventSeqs }),
+  } as SessionEvent)
+}
+
+function appendManualTurn(events: SessionEvent[], manual: ManualTurn): void {
+  const { turn, user, assistant } = manual
+  appendLogSeedEvent(events, 'turn/start', { turn })
+  appendSurfaceSeedEvent(events, 'user/message', user, { surfaceOp: 'append' })
+  appendLogSeedEvent(events, 'step/start', { turn, step: 1 })
+  appendSurfaceSeedEvent(events, 'assistant/message', { turn, step: 1, message: assistant }, {
+    surfaceOp: 'append',
+    sourceEventSeqs: [],
+  })
+  appendLogSeedEvent(events, 'step/end', { turn, step: 1 })
+  appendLogSeedEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+function versionSeed(source: Session, plan: VersionPlan): { events: SessionEvent[]; inheritedLength: number } {
+  const events = inheritedSeed(source, plan.boundary)
+  const inheritedLength = events.length
+  appendLogSeedEvent(events, 'message-edit/version', plan.version, true)
+  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn)
+  return { events, inheritedLength }
+}
+
+function sessionPreset(session: Session): string | undefined {
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index]
+    if (event?.type === 'agent-preset/selected') return (event.data as { agentPreset: string }).agentPreset
+  }
+  return session.header.agentPreset
+}
+
+// ---------------------------------------------------------------------------
+// Child-agent creation
+// ---------------------------------------------------------------------------
+
+async function createVersionAgent(
+  ctx: Context,
+  sourceAgent: Agent,
+  childId: SessionId,
+  plan: VersionPlan,
+  options: AgentOptions,
+): Promise<AgentHandle> {
+  const source = sourceAgent.session
+  const seed = versionSeed(source, plan)
+  const presets = ctx.get('agentPresets')
+  const presetId = sessionPreset(source)
+  let setup: ((agentCtx: Context) => Promise<void> | void) | undefined
+  if (presets !== undefined) {
+    // Prefer joining the source agent's exact standing composition so a fork
+    // inherits the same generation the parent's history was produced under.
+    // A resumed source (borrowed only to read history) has no joined preset,
+    // so fall back to a fresh mount from the durable preset id.
+    const joinedPreset = presets.composedPreset(sourceAgent.ctx)
+    if (joinedPreset !== undefined) {
+      setup = (agentCtx) => {
+        presets.composeFrom(agentCtx, sourceAgent.ctx)
+      }
+    } else if (presetId !== undefined) {
+      const resolved = (await presets.resolve(presetId)).id
+      setup = async (agentCtx) => {
+        await presets.mount(agentCtx, resolved)
+      }
+    }
+  }
+  const child = await ctx.agents.create({
+    sessionId: childId,
+    seed: seed.events,
+    meta: {
+      ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
+      parentSession: source.id,
+      seedLength: seed.inheritedLength,
+      ...(presetId === undefined ? {} : { agentPreset: presetId }),
+    },
+    agentOptions: options,
+    ...(setup === undefined ? {} : { setup }),
+  })
+  try {
+    await ctx.sessions.flush(child.agent.session)
+    return child
+  } catch (error) {
+    await child.dispose()
+    throw error
+  }
+}
+
+function sourceWorkspace(ctx: Context, sessionId: SessionId): Workspace | undefined {
+  return ctx.workspaceRegistry.list().find((workspace) => workspace.sessionIds.includes(sessionId))
+}
+
+async function recoverOperation(inverses: Array<() => Promise<void>>): Promise<void> {
+  const failures: unknown[] = []
+  for (const inverse of inverses.reverse()) {
+    try {
+      await inverse()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, '版本操作恢复失败。')
+}
+
+async function runOperation(ctx: Context, operation: MessageEditOperation): Promise<MessageEditOperationResult> {
+  const sourceId = sessionIdOf(operation.sessionId)
+  return withSourceAgent(ctx, sourceId, async (source) => {
+    const childId = sessionIdOf(`session-${crypto.randomUUID()}`)
+    const inverses: Array<() => Promise<void>> = []
+    try {
+      const events = source.session.events
+      const plan = planOperation(operation, events)
+      const options = agentOptions(events, source.options)
+      const child = await createVersionAgent(ctx, source, childId, plan, options)
+      inverses.push(() => child.dispose())
+      const workspace = sourceWorkspace(ctx, sourceId)
+      if (workspace !== undefined) {
+        await workspace.attachSession(childId)
+        inverses.push(() => workspace.detachSession(childId))
+      }
+      for (const message of plan.queuedUsers) child.agent.followup(message)
+      inverses.length = 0
+      return {
+        sessionId: childId,
+        queuedTurns: plan.queuedUsers.length,
+      }
+    } catch (error) {
+      try {
+        await recoverOperation(inverses)
+      } catch (recoveryError) {
+        throw new AggregateError([error, recoveryError], '版本操作及其恢复均失败。')
+      }
+      throw error
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Lineage projection
+// ---------------------------------------------------------------------------
+
+interface OwnVersion {
+  effect: VersionEffect
+  inverseSessionId: string
+  time: number
+}
+
+function ownVersionEvent(header: SessionHeader, events: readonly SessionEvent[]): OwnVersion | undefined {
+  const inherited = header.seedLength ?? 0
+  const ownEvents = events.filter((event) => event.type === 'message-edit/version' && event.seq >= inherited)
+  if (ownEvents.length === 0) return undefined
+  if (ownEvents.length > 1) throw new Error(`会话 ${header.id} 包含多个自身版本效果。`)
+  const event = ownEvents[0]
+  if (event === undefined) return undefined
+  const parent = header.parentSession
+  if ('schemaVersion' in (event.data as object)) {
+    const version = event.data as MessageEditVersionEvent
+    if (version.schemaVersion !== MESSAGE_EDIT_VERSION_SCHEMA) {
+      throw new Error(`会话 ${header.id} 使用不支持的版本效果结构。`)
+    }
+    if (version.inverse.kind !== 'restore-version' || parent === undefined || version.inverse.sessionId !== parent) {
+      throw new Error(`会话 ${header.id} 的版本效果与逆不匹配。`)
+    }
+    return { effect: version.effect, inverseSessionId: version.inverse.sessionId, time: event.time }
+  }
+  const legacy = event.data as unknown as {
+    sourceSessionId: string
+    operation: 'edit' | 'reroll' | 'retry'
+    cascade: CascadePolicy
+    targetTurn: number
+    targetEventSeq: number
+    targetBlockIndex?: number
+    blockKind?: EditableBlockKind
+    before?: string
+    after?: string
+  }
+  if (parent === undefined || legacy.sourceSessionId !== parent) {
+    throw new Error(`会话 ${header.id} 的旧版恢复目标与父版本不匹配。`)
+  }
+  return {
+    effect: {
+      id: `legacy:${header.id}:${String(event.seq)}`,
+      operation: legacy.operation,
+      cascade: legacy.cascade,
+      targetTurn: legacy.targetTurn,
+      targetEventSeq: legacy.targetEventSeq,
+      ...(legacy.targetBlockIndex === undefined ? {} : { targetBlockIndex: legacy.targetBlockIndex }),
+      ...(legacy.blockKind === undefined ? {} : { blockKind: legacy.blockKind }),
+      ...(legacy.before === undefined ? {} : { before: legacy.before }),
+      ...(legacy.after === undefined ? {} : { after: legacy.after }),
+    },
+    inverseSessionId: legacy.sourceSessionId,
+    time: event.time,
+  }
+}
+
+function flattenLineage(root: SessionRecord, descendants: SessionLineageNode[]): Array<{ record: SessionRecord; depth: number }> {
+  const result: Array<{ record: SessionRecord; depth: number }> = [{ record: root, depth: 0 }]
+  const visit = (nodes: SessionLineageNode[], depth: number): void => {
+    const ordered = [...nodes].sort((left, right) =>
+      left.session.header.createdAt - right.session.header.createdAt
+      || String(left.session.header.id).localeCompare(String(right.session.header.id)),
+    )
+    for (const node of ordered) {
+      result.push({ record: node.session, depth })
+      visit(node.descendants, depth + 1)
+    }
+  }
+  visit(descendants, 1)
+  return result
+}
+
+/** Bounded parallel inspection of persisted branches; matches the corpus worker shape. */
+const TIMELINE_READ_CONCURRENCY = 4
+
+async function mapConcurrent<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const run = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= items.length) return
+      results[index] = await worker(items[index])
+    }
+  }
+  const workers = Math.min(TIMELINE_READ_CONCURRENCY, items.length)
+  await Promise.all(Array.from({ length: workers }, () => run()))
+  return results
+}
+
+/** Full log for the requested session: live borrow, persisted inspection, query fallback. */
+async function readCurrentLog(ctx: Context, sessionId: SessionId): Promise<readonly SessionEvent[]> {
+  const live = ctx.sessions.get(sessionId)
+  if (live !== undefined) return live.events
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence !== undefined) return (await persistence.inspect(sessionId)).events
+  return (await ctx.sessionQuery.readSession(sessionId)).events
+}
+
+/** Own-version scan window for one lineage node: the tail from the durable seed boundary is enough. */
+async function versionLog(ctx: Context, record: SessionHeader): Promise<readonly SessionEvent[]> {
+  const inherited = record.seedLength ?? 0
+  const live = ctx.sessions.get(record.id)
+  if (live !== undefined) return live.events.slice(inherited)
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence !== undefined) return (await persistence.readFrom(record.id, inherited)).events
+  return (await ctx.sessionQuery.readSession(record.id)).events.slice(inherited)
+}
+
+async function timeline(ctx: Context, sessionId: SessionId): Promise<MessageEditTimeline> {
+  const targetTrace = await ctx.sessionQuery.traceSession(sessionId)
+  const rootId = targetTrace.complete
+    ? targetTrace.root.header.id
+    : targetTrace.ancestors.at(-1)?.header.id ?? sessionId
+  const rootTrace = rootId === sessionId ? targetTrace : await ctx.sessionQuery.traceSession(rootId)
+  const lineage = flattenLineage(rootTrace.target, rootTrace.descendants)
+  const logs = await mapConcurrent(lineage, async ({ record }) => {
+    if (record.header.id === sessionId) return readCurrentLog(ctx, sessionId)
+    if (record.header.parentSession === undefined) return []
+    return versionLog(ctx, record.header)
+  })
+  const recordsById = new Map(lineage.map(({ record }) => [record.header.id, record]))
+  const currentPath = new Set<SessionId>()
+  let pathId: SessionId | undefined = sessionId
+  while (pathId !== undefined && !currentPath.has(pathId)) {
+    currentPath.add(pathId)
+    pathId = recordsById.get(pathId)?.header.parentSession
+  }
+  const versions: VersionSummary[] = lineage.map(({ record, depth }, index) => {
+    const version = ownVersionEvent(record.header, logs[index] ?? [])
+    return {
+      sessionId: record.header.id,
+      ...(record.header.parentSession === undefined ? {} : { parentSessionId: record.header.parentSession }),
+      ...(version === undefined ? {} : {
+        effectId: version.effect.id,
+        inverseSessionId: version.inverseSessionId,
+      }),
+      createdAt: version?.time ?? record.header.createdAt,
+      depth,
+      current: record.header.id === sessionId,
+      onCurrentEffectPath: currentPath.has(record.header.id),
+      ...(version === undefined ? {} : {
+        operation: version.effect.operation,
+        cascade: version.effect.cascade,
+        targetTurn: version.effect.targetTurn,
+        ...(version.effect.blockKind === undefined ? {} : { blockKind: version.effect.blockKind }),
+        ...(version.effect.before === undefined ? {} : { before: version.effect.before }),
+        ...(version.effect.after === undefined ? {} : { after: version.effect.after }),
+      }),
+    }
+  })
+  const effectIds = new Set<string>()
+  for (const version of versions) {
+    if (version.effectId === undefined) continue
+    if (effectIds.has(version.effectId)) throw new Error(`版本效果 ${version.effectId} 重复。`)
+    effectIds.add(version.effectId)
+  }
+  const versionsById = new Map(versions.map((version) => [version.sessionId, version]))
+  const undoStack: string[] = []
+  let undoCursor = versionsById.get(sessionId)
+  while (undoCursor?.inverseSessionId !== undefined) {
+    const inverseId = undoCursor.inverseSessionId
+    if (undoStack.includes(inverseId)) throw new Error('版本效果逆链包含循环。')
+    if (!versionsById.has(inverseId)) throw new Error(`恢复目标 ${inverseId} 不在可见版本树中。`)
+    undoStack.push(inverseId)
+    undoCursor = versionsById.get(inverseId)
+  }
+  const redoSessionIds = versions
+    .filter((version) => version.inverseSessionId === sessionId)
+    .map((version) => version.sessionId)
+  const currentIndex = versions.findIndex((version) => version.current)
+  const currentLog = logs[currentIndex]
+  if (currentIndex < 0 || currentLog === undefined) throw new Error('当前版本不在版本树中。')
+  const turns = closedTurns(currentLog)
+  return {
+    sessionId,
+    messages: editableMessages(turns),
+    retryableTurns: retryableTurns(turns),
+    versions,
+    undoStack,
+    redoSessionIds,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP route
+// ---------------------------------------------------------------------------
+
+function objectValue(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('请求体必须是 JSON 对象。')
+  }
+  return value as Record<string, unknown>
+}
+
+function sessionIdOf(value: unknown): SessionId {
+  if (typeof value !== 'string' || value.length === 0) throw new TypeError('sessionId 必须是非空字符串。')
+  return SessionId(value)
+}
+
+function integerOf(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError(`${name} 必须是非负安全整数。`)
+  return value as number
+}
+
+function cascadeOf(value: unknown): CascadePolicy {
+  if (value !== 'truncate' && value !== 'preserve') throw new TypeError('cascade 必须是 truncate 或 preserve。')
+  return value
+}
+
+function decodeOperation(value: unknown): MessageEditOperation {
+  const record = objectValue(value)
+  const sessionId = sessionIdOf(record['sessionId'])
+  switch (record['action']) {
+    case 'edit':
+      if (typeof record['text'] !== 'string') throw new TypeError('text 必须是字符串。')
+      return {
+        action: 'edit',
+        sessionId,
+        eventSeq: integerOf(record['eventSeq'], 'eventSeq'),
+        blockIndex: integerOf(record['blockIndex'], 'blockIndex'),
+        text: record['text'],
+        cascade: cascadeOf(record['cascade']),
+      }
+    case 'reroll':
+      return { action: 'reroll', sessionId }
+    case 'retry':
+      return {
+        action: 'retry',
+        sessionId,
+        turn: integerOf(record['turn'], 'turn'),
+        cascade: cascadeOf(record['cascade']),
+      }
+    default:
+      throw new TypeError('action 必须是 edit、reroll 或 retry。')
+  }
+}
+
+function requestJson(request: import('node:http').IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const decoder = new TextDecoder()
+    let text = ''
+    request.on('data', (chunk) => {
+      text += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
+    })
+    request.on('end', () => {
+      try {
+        text += decoder.decode()
+        resolve(JSON.parse(text))
+      } catch (error) {
+        reject(error)
+      }
+    })
+    request.on('error', reject)
+  })
+}
+
+function respondJson(response: import('node:http').ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  response.end(JSON.stringify(value))
+}
+
+async function handleRoute(
+  ctx: Context,
+  request: import('node:http').IncomingMessage,
+  response: import('node:http').ServerResponse,
+): Promise<void> {
+  try {
+    if (request.method === 'GET') {
+      const url = new URL(request.url ?? '/message-edit', 'http://message-edit.local')
+      respondJson(response, 200, await timeline(ctx, sessionIdOf(url.searchParams.get('sessionId'))))
+      return
+    }
+    if (request.method === 'POST') {
+      respondJson(response, 200, await runOperation(ctx, decodeOperation(await requestJson(request))))
+      return
+    }
+    response.writeHead(405)
+    response.end()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    respondJson(response, error instanceof TypeError ? 400 : 409, { error: message })
+  }
+}
+
+/** Register the reversible route contribution. */
+export function apply(ctx: Context): void {
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: MESSAGE_EDIT_PATH,
+    handler: (request, response) => handleRoute(ctx, request, response),
+  } satisfies WebRoute), 'message-edit: HTTP route')
+}

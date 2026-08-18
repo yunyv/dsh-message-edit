@@ -99,6 +99,9 @@ interface MessageEditVersionEvent {
 - `conversation.session.header.actions`
   - `id: message-edit-controls`
   - 直接父效果撤销、直接子效果重施加、效果链计数、最后回复重生成
+- `conversation.chat.assistant-actions`
+  - `id: message-edit-assistant-actions`
+  - 助手消息行内的编辑 / 重试按钮，走官方 per-message action slot（`messageId` 派发）；用户消息无对应 slot，仍由 DOM 注入补齐
 
 组件使用 CSS Modules 与 `--dsw-*` 语义 token，不引入 UI 库。所有产品文案为中文，代码注释为英文。
 
@@ -114,11 +117,12 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.0-rc.6` 类型与本地工具链（typescript、tsdown、lightningcss）。构建生成：
+源码位于 `src/`（Host 在 `src/index.ts`，Browser 在 `src/client/`），构建脚本为 `scripts/build.mjs`，基于 esbuild + lightningcss：
 
-- `index.mjs`：Host 插件
-- `client.js`：Browser 插件
-- `client.js.map`：Browser source map
+- Host：`src/index.ts` → `index.mjs`（ESM，`@deepseek-ai/*` 外部化）
+- Browser：`src/client/index.ts` → `client.js` + `client.js.map`（`window.__ModuleLoader__.load` 闭包工厂，CSS Modules 由 lightningcss 编译为哈希类名映射 + 幂等 `<style data-plugin>` 注入）
+
+`npm run typecheck`（`tsc --noEmit`）校验类型；`npm run build` 同时产出两个半区。
 
 ## 范围边界
 

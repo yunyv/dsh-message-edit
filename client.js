@@ -1,1255 +1,1242 @@
-window.__ModuleLoader__.load({
-	id: "dsh-message-edit",
-	factory: (require) => {
-		var module = { exports: {} };
-		var exports = module.exports;
-		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
-		let react = require("react");
-		let react_jsx_runtime = require("react/jsx-runtime");
-		//#region src/shared.ts
-		/** Same-origin endpoint owned by the Message Edit host plugin. */
-		const MESSAGE_EDIT_PATH = "/message-edit";
-		//#endregion
-		//#region src/client/controller.ts
-		/** Merge a burst of turn completions into one refresh. */
-		const REFRESH_DELAY_MS = 300;
-		function messageOf(error) {
-			return error instanceof Error ? error.message : String(error);
-		}
-		function objectValue(value, label) {
-			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`${label} 不是对象`);
-			return value;
-		}
-		function stringValue(value, label) {
-			if (typeof value !== "string") throw new TypeError(`${label} 不是字符串`);
-			return value;
-		}
-		function numberValue(value, label) {
-			if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${label} 不是数字`);
-			return value;
-		}
-		function booleanValue(value, label) {
-			if (typeof value !== "boolean") throw new TypeError(`${label} 不是布尔值`);
-			return value;
-		}
-		function blockKind(value) {
-			if (value !== "user" && value !== "assistant.reasoning" && value !== "assistant.response") throw new TypeError("消息块类型无效");
-			return value;
-		}
-		function decodeMessage(value, index) {
-			const row = objectValue(value, `messages[${String(index)}]`);
-			return {
-				key: stringValue(row["key"], "消息 key"),
-				turn: numberValue(row["turn"], "消息 turn"),
-				eventSeq: numberValue(row["eventSeq"], "消息 eventSeq"),
-				blockIndex: numberValue(row["blockIndex"], "消息 blockIndex"),
-				kind: blockKind(row["kind"]),
-				text: stringValue(row["text"], "消息 text"),
-				time: numberValue(row["time"], "消息 time")
-			};
-		}
-		function decodeRetryable(value, index) {
-			const row = objectValue(value, `retryableTurns[${String(index)}]`);
-			return {
-				turn: numberValue(row["turn"], "回合 turn"),
-				userEventSeq: numberValue(row["userEventSeq"], "回合 userEventSeq"),
-				preview: stringValue(row["preview"], "回合 preview"),
-				time: numberValue(row["time"], "回合 time")
-			};
-		}
-		function optionalOperation(value) {
-			if (value === void 0) return void 0;
-			if (value === "edit" || value === "reroll" || value === "retry") return value;
-			throw new TypeError("版本 operation 无效");
-		}
-		function decodeVersion(value, index) {
-			const row = objectValue(value, `versions[${String(index)}]`);
-			const operation = optionalOperation(row["operation"]);
-			const cascade = row["cascade"];
-			if (cascade !== void 0 && cascade !== "truncate" && cascade !== "preserve") throw new TypeError("版本 cascade 无效");
-			const kind = row["blockKind"] === void 0 ? void 0 : blockKind(row["blockKind"]);
-			return {
-				sessionId: stringValue(row["sessionId"], "版本 sessionId"),
-				...row["parentSessionId"] === void 0 ? {} : { parentSessionId: stringValue(row["parentSessionId"], "版本 parentSessionId") },
-				...row["effectId"] === void 0 ? {} : { effectId: stringValue(row["effectId"], "版本 effectId") },
-				...row["inverseSessionId"] === void 0 ? {} : { inverseSessionId: stringValue(row["inverseSessionId"], "版本 inverseSessionId") },
-				createdAt: numberValue(row["createdAt"], "版本 createdAt"),
-				depth: numberValue(row["depth"], "版本 depth"),
-				current: booleanValue(row["current"], "版本 current"),
-				onCurrentEffectPath: booleanValue(row["onCurrentEffectPath"], "版本 onCurrentEffectPath"),
-				...operation === void 0 ? {} : { operation },
-				...cascade === void 0 ? {} : { cascade },
-				...row["targetTurn"] === void 0 ? {} : { targetTurn: numberValue(row["targetTurn"], "版本 targetTurn") },
-				...kind === void 0 ? {} : { blockKind: kind },
-				...row["before"] === void 0 ? {} : { before: stringValue(row["before"], "版本 before") },
-				...row["after"] === void 0 ? {} : { after: stringValue(row["after"], "版本 after") }
-			};
-		}
-		function arrayValue(value, label) {
-			if (!Array.isArray(value)) throw new TypeError(`${label} 不是数组`);
-			return value;
-		}
-		function stringArray(value, label) {
-			return arrayValue(value, label).map((item, index) => stringValue(item, `${label}[${String(index)}]`));
-		}
-		function decodeTimeline(value) {
-			const data = objectValue(value, "Timeline 响应");
-			return {
-				sessionId: stringValue(data["sessionId"], "Timeline sessionId"),
-				messages: arrayValue(data["messages"], "Timeline messages").map(decodeMessage),
-				retryableTurns: arrayValue(data["retryableTurns"], "Timeline retryableTurns").map(decodeRetryable),
-				versions: arrayValue(data["versions"], "Timeline versions").map(decodeVersion),
-				undoStack: stringArray(data["undoStack"], "Timeline undoStack"),
-				redoSessionIds: stringArray(data["redoSessionIds"], "Timeline redoSessionIds")
-			};
-		}
-		function decodeOperationResult(value) {
-			const data = objectValue(value, "操作响应");
-			return {
-				sessionId: stringValue(data["sessionId"], "操作 sessionId"),
-				queuedTurns: numberValue(data["queuedTurns"], "操作 queuedTurns")
-			};
-		}
-		async function responseValue(response) {
-			const value = await response.json();
-			if (response.ok) return value;
-			const error = objectValue(value, "错误响应")["error"];
-			throw new Error(typeof error === "string" ? error : `请求失败：HTTP ${String(response.status)}`);
-		}
-		function conversationRevision(snapshot) {
-			const turnEnds = [...snapshot.turnEnds.entries()].map(([turn, seq]) => `${String(turn)}:${String(seq)}`).join(",");
-			return [
-				snapshot.openState,
-				snapshot.removed,
-				snapshot.hasMore,
-				turnEnds
-			].join("|");
-		}
-		function lineageRevision(snapshot, sessionId) {
-			let root = sessionId;
-			const ancestorIds = /* @__PURE__ */ new Set();
-			while (!ancestorIds.has(root)) {
-				ancestorIds.add(root);
-				const parent = snapshot.byId[root]?.parentId;
-				if (parent === void 0 || snapshot.byId[parent] === void 0) break;
-				root = parent;
-			}
-			const connected = [];
-			for (const rawId of Object.keys(snapshot.byId).sort()) {
-				const id = rawId;
-				const seen = /* @__PURE__ */ new Set();
-				let cursor = id;
-				while (cursor !== void 0 && !seen.has(cursor)) {
-					if (cursor === root) {
-						connected.push(`${id}>${snapshot.byId[id]?.parentId ?? ""}`);
-						break;
-					}
-					seen.add(cursor);
-					cursor = snapshot.byId[cursor]?.parentId;
-				}
-			}
-			return connected.join("|");
-		}
-		/** One stable controller is shared by all entries mounted for the same session. */
-		var MessageEditController = class {
-			sessionId;
-			store = (0, _deepseek_ai_dsh_client_runtime_client.createSnapshotStore)({
-				status: "idle",
-				error: null,
-				pending: null,
-				timeline: null
-			});
-			face;
-			generation = 0;
-			ctx;
-			sessions;
-			sessionSource;
-			sessionSourceDispose;
-			sessionRevision;
-			listRevision = "";
-			refreshScheduled = false;
-			refreshTimer;
-			observing = false;
-			navigationWaits = /* @__PURE__ */ new Set();
-			disposeObservation = void 0;
-			inflight = null;
-			rerunAfter = false;
-			abort = null;
-			disposed = false;
-			users = 0;
-			constructor(ctx, sessionId) {
-				this.sessionId = sessionId;
-				this.ctx = ctx;
-				this.sessions = ctx.get("sessions");
-				this.face = {
-					hooks: { messageEdit: this.store },
-					acquire: () => {
-						this.users += 1;
-						if (this.users === 1 && this.disposed) this.revive();
-						return () => this.release();
-					},
-					load: () => {
-						this.load();
-					},
-					edit: (message, text, cascade) => this.mutate({
-						action: "edit",
-						sessionId: this.sessionId,
-						eventSeq: message.eventSeq,
-						blockIndex: message.blockIndex,
-						text,
-						cascade
-					}),
-					retry: (turn, cascade) => this.mutate({
-						action: "retry",
-						sessionId: this.sessionId,
-						turn,
-						cascade
-					}),
-					reroll: () => this.mutate({
-						action: "reroll",
-						sessionId: this.sessionId
-					}),
-					openVersion: (sessionId) => this.openWhenListed(sessionId)
-				};
-				this.observe();
-			}
-			observe() {
-				this.disposeObservation = this.ctx.effect(() => this.observeDependencies(), `message-edit: observe ${this.sessionId}`);
-			}
-			release() {
-				this.users -= 1;
-				if (this.users <= 0) this.dispose();
-			}
-			/** Tear subscriptions down once no mounted entry uses this controller. */
-			dispose() {
-				if (this.disposed) return;
-				this.disposed = true;
-				this.generation += 1;
-				if (this.refreshTimer !== void 0) {
-					clearTimeout(this.refreshTimer);
-					this.refreshTimer = void 0;
-					this.refreshScheduled = false;
-				}
-				this.abort?.abort();
-				this.abort = null;
-				this.disposeObservation?.();
-				this.disposeObservation = void 0;
-			}
-			/** Re-observe after a transient zero; the retained store keeps old data
-			* until the immediate refetch below commits. */
-			revive() {
-				this.disposed = false;
-				this.observe();
-				this.refresh();
-			}
-			/** Bind to replaceable value sources instead of retaining a Session object. */
-			observeDependencies() {
-				this.observing = true;
-				this.listRevision = lineageRevision(this.sessions.list.getSnapshot(), this.sessionId);
-				this.bindSessionSource();
-				const disposeList = this.sessions.list.subscribe(() => {
-					const rebound = this.bindSessionSource();
-					const nextRevision = lineageRevision(this.sessions.list.getSnapshot(), this.sessionId);
-					if (nextRevision === this.listRevision && !rebound) return;
-					this.listRevision = nextRevision;
-					this.invalidate();
-				});
-				return () => {
-					this.observing = false;
-					this.generation += 1;
-					disposeList();
-					this.sessionSourceDispose?.();
-					this.sessionSourceDispose = void 0;
-					this.sessionSource = void 0;
-					this.sessionRevision = void 0;
-					for (const cancel of [...this.navigationWaits]) cancel();
-				};
-			}
-			bindSessionSource() {
-				const source = this.sessions.binding(this.sessionId)?.session;
-				if (source === this.sessionSource) return false;
-				this.sessionSourceDispose?.();
-				this.sessionSource = source;
-				this.sessionRevision = source === void 0 ? void 0 : conversationRevision(source.getSnapshot());
-				this.sessionSourceDispose = source?.subscribe(() => {
-					if (this.sessionSource !== source) return;
-					const revision = conversationRevision(source.getSnapshot());
-					if (revision === this.sessionRevision) return;
-					this.sessionRevision = revision;
-					this.invalidate();
-				});
-				return true;
-			}
-			invalidate() {
-				if (!this.observing || this.store.getSnapshot().status === "idle" || this.refreshScheduled) return;
-				this.refreshScheduled = true;
-				this.refreshTimer = setTimeout(() => {
-					this.refreshTimer = void 0;
-					this.refreshScheduled = false;
-					if (this.observing && this.store.getSnapshot().status !== "idle") this.refresh();
-				}, REFRESH_DELAY_MS);
-			}
-			/** Invalidation-driven refetch: one in-flight request absorbs the demand
-			* and commits a single rerun once it settles. */
-			refresh() {
-				if (this.disposed) return;
-				if (this.inflight !== null) {
-					this.rerunAfter = true;
-					return;
-				}
-				this.load();
-			}
-			/** Refetch the full value-level projection; concurrent callers share one
-			* request, and an invalidation during flight schedules exactly one rerun. */
-			async load() {
-				if (this.disposed) return;
-				if (this.inflight !== null) return this.inflight;
-				const generation = ++this.generation;
-				this.abort?.abort();
-				const abort = new AbortController();
-				this.abort = abort;
-				this.store.update((state) => {
-					state.status = "loading";
-					state.error = null;
-				});
-				const run = this.performLoad(generation, abort);
-				this.inflight = run;
-				try {
-					await run;
-				} finally {
-					if (this.inflight === run) this.inflight = null;
-					if (this.rerunAfter && !this.disposed) {
-						this.rerunAfter = false;
-						this.load();
-					}
-				}
-			}
-			async performLoad(generation, abort) {
-				try {
-					const timeline = decodeTimeline(await responseValue(await fetch(`${MESSAGE_EDIT_PATH}?sessionId=${encodeURIComponent(this.sessionId)}`, {
-						method: "GET",
-						headers: { accept: "application/json" },
-						cache: "no-store",
-						signal: abort.signal
-					})));
-					if (generation !== this.generation) return;
-					this.store.update((state) => {
-						state.status = "ready";
-						state.error = null;
-						state.timeline = timeline;
-					});
-				} catch (error) {
-					if (generation !== this.generation) return;
-					this.store.update((state) => {
-						state.status = "error";
-						state.error = messageOf(error);
-					});
-				}
-			}
-			/** Refresh only controllers whose projection has already been requested. */
-			refreshIfLoaded() {
-				if (this.disposed || this.store.getSnapshot().status === "idle") return;
-				this.refresh();
-			}
-			async mutate(operation) {
-				const current = this.store.getSnapshot();
-				if (current.pending !== null || current.status !== "ready") return false;
-				this.store.update((state) => {
-					state.pending = operation.action;
-					state.error = null;
-				});
-				try {
-					const result = decodeOperationResult(await responseValue(await fetch(MESSAGE_EDIT_PATH, {
-						method: "POST",
-						headers: {
-							accept: "application/json",
-							"content-type": "application/json"
-						},
-						body: JSON.stringify(operation)
-					})));
-					if (this.disposed) return true;
-					this.store.update((state) => {
-						state.pending = null;
-					});
-					await this.openWhenListed(result.sessionId);
-					return true;
-				} catch (error) {
-					if (this.disposed) return false;
-					this.store.update((state) => {
-						state.pending = null;
-						state.error = messageOf(error);
-					});
-					return false;
-				}
-			}
-			/** Session-list publication is the reactive dependency for navigation. */
-			openWhenListed(sessionId) {
-				if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
-					this.sessions.open(sessionId);
-					return Promise.resolve();
-				}
-				return new Promise((resolve) => {
-					let settled = false;
-					let dispose = () => {};
-					const finish = (open) => {
-						if (settled) return;
-						settled = true;
-						dispose();
-						this.navigationWaits.delete(cancel);
-						if (open) this.sessions.open(sessionId);
-						resolve();
-					};
-					const cancel = () => {
-						finish(false);
-					};
-					this.navigationWaits.add(cancel);
-					dispose = this.sessions.list.subscribe(() => {
-						if (this.sessions.list.getSnapshot().byId[sessionId] === void 0) return;
-						finish(true);
-					});
-					if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) finish(true);
-				});
-			}
-		};
-		//#endregion
-		//#region \0dsh-css:/home/moeblack/repos/dsh-message-edit/src/client/InlineMessageEdit.module.css.mjs
-		const css$2 = ".Kad6XG_overlay{z-index:1000;background:var(--dsw-alias-bg-mask,#00000073);justify-content:center;align-items:center;display:flex;position:fixed;inset:0}.Kad6XG_panel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:10px;width:560px;padding:14px 16px}.Kad6XG_title{color:var(--dsw-alias-label-primary);padding:4px 0 10px;font-size:13px}.Kad6XG_input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);width:100%;min-height:160px;color:var(--dsw-alias-label-primary);font:inherit;resize:vertical;border-radius:8px;padding:10px}.Kad6XG_footer{justify-content:flex-end;gap:8px;padding:10px 0 0;display:flex}.Kad6XG_footer button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;padding:6px 14px}.Kad6XG_iconButton{width:20px;height:20px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.Kad6XG_iconButton:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-hover)}.Kad6XG_picker{flex-direction:column;gap:6px;padding:4px 0 12px;display:flex}.Kad6XG_pickerItem{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;border-radius:6px;padding:8px 10px;font-size:12px}.Kad6XG_pickerItem:hover{background:var(--dsw-alias-bg-module-platform)}.Kad6XG_pickerItemActive{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;align-self:flex-end;padding:6px 14px}";
-		const tagId$2 = "dsh-message-edit/InlineMessageEdit.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-message-edit";
-			tag.dataset.pluginCss = tagId$2;
-			tag.textContent = css$2;
-			document.head.appendChild(tag);
-		}
-		var InlineMessageEdit_module_css_default = {
-			"panel": "Kad6XG_panel",
-			"overlay": "Kad6XG_overlay",
-			"title": "Kad6XG_title",
-			"iconButton": "Kad6XG_iconButton",
-			"picker": "Kad6XG_picker",
-			"pickerItem": "Kad6XG_pickerItem",
-			"pickerItemActive": "Kad6XG_pickerItemActive",
-			"input": "Kad6XG_input",
-			"footer": "Kad6XG_footer"
-		};
-		//#endregion
-		//#region src/client/InlineMessageEdit.tsx
-		/**
-		* Message-row edit affordance: injects retry + edit icon buttons into each
-		* settled message's icon-actions row (the official MessageIconActions has no
-		* plugin slot, so injection rides a MutationObserver over action rows).
-		* Icons are the official outline-16 SVGs inlined to avoid bundling the
-		* primitives package.
-		*/
-		const BLOCK_TITLE = {
-			user: "编辑用户消息",
-			"assistant.reasoning": "编辑助手思考",
-			"assistant.response": "编辑助手回复"
-		};
-		const STYLE = {
-			overlay: InlineMessageEdit_module_css_default["overlay"] ?? "",
-			panel: InlineMessageEdit_module_css_default["panel"] ?? "",
-			title: InlineMessageEdit_module_css_default["title"] ?? "",
-			input: InlineMessageEdit_module_css_default["input"] ?? "",
-			footer: InlineMessageEdit_module_css_default["footer"] ?? "",
-			iconButton: InlineMessageEdit_module_css_default["iconButton"] ?? "",
-			picker: InlineMessageEdit_module_css_default["picker"] ?? "",
-			pickerItem: InlineMessageEdit_module_css_default["pickerItem"] ?? "",
-			pickerItemActive: InlineMessageEdit_module_css_default["pickerItemActive"] ?? ""
-		};
-		/** Official ic_ds_refresh_outline_16 path (dsh-client-ui-primitives). */
-		const REFRESH_PATH = "M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z";
-		/** Official ic_ds_edit_outline_16 path (dsh-client-ui-primitives). */
-		const EDIT_PATH = "M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z";
-		function svgIcon(path) {
-			const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-			svg.setAttribute("width", "16");
-			svg.setAttribute("height", "16");
-			svg.setAttribute("viewBox", "0 0 16 16");
-			svg.setAttribute("fill", "none");
-			const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-			p.setAttribute("d", path);
-			p.setAttribute("fill", "currentColor");
-			svg.appendChild(p);
-			return svg;
-		}
-		function blockTitle(kind) {
-			return BLOCK_TITLE[kind] ?? "编辑消息";
-		}
-		/** Mount one editor DOM effect and return its exact inverse. */
-		function mountEditor(block, edit, close) {
-			const overlay = document.createElement("div");
-			overlay.className = STYLE.overlay;
-			const panel = document.createElement("div");
-			panel.className = STYLE.panel;
-			const title = document.createElement("div");
-			title.className = STYLE.title;
-			title.textContent = blockTitle(block.kind);
-			const input = document.createElement("textarea");
-			input.className = STYLE.input;
-			input.value = block.text;
-			const footer = document.createElement("div");
-			footer.className = STYLE.footer;
-			const save = document.createElement("button");
-			save.textContent = "保存";
-			const cancel = document.createElement("button");
-			cancel.textContent = "取消";
-			footer.append(save, cancel);
-			panel.append(title, input, footer);
-			overlay.appendChild(panel);
-			document.body.appendChild(overlay);
-			input.focus();
-			input.setSelectionRange(input.value.length, input.value.length);
-			let mounted = true;
-			let saving = false;
-			const saveEdit = () => {
-				if (saving) return;
-				saving = true;
-				save.disabled = true;
-				edit(block, input.value, "truncate").then((applied) => {
-					if (!mounted) return;
-					if (applied) {
-						close();
-						return;
-					}
-					saving = false;
-					save.disabled = false;
-				});
-			};
-			const cancelEdit = () => {
-				close();
-			};
-			const dismiss = (event) => {
-				if (event.target === overlay) close();
-			};
-			save.addEventListener("click", saveEdit);
-			cancel.addEventListener("click", cancelEdit);
-			overlay.addEventListener("click", dismiss);
-			return () => {
-				mounted = false;
-				save.removeEventListener("click", saveEdit);
-				cancel.removeEventListener("click", cancelEdit);
-				overlay.removeEventListener("click", dismiss);
-				overlay.remove();
-			};
-		}
-		/** Mount one block-picker DOM effect and return its exact inverse. */
-		function mountPicker(blocks, select, close) {
-			const overlay = document.createElement("div");
-			overlay.className = STYLE.overlay;
-			const panel = document.createElement("div");
-			panel.className = STYLE.panel;
-			const title = document.createElement("div");
-			title.className = STYLE.title;
-			title.textContent = blocks.some((block) => block.kind === "user") ? "编辑消息" : "编辑助手消息";
-			const picker = document.createElement("div");
-			picker.className = STYLE.picker;
-			const itemListeners = [];
-			for (const block of blocks) {
-				const item = document.createElement("button");
-				item.className = STYLE.pickerItem;
-				item.textContent = `${blockTitle(block.kind)}：${block.text.slice(0, 24)}${block.text.length > 24 ? "…" : ""}`;
-				const listener = () => {
-					select(block);
-				};
-				item.addEventListener("click", listener);
-				itemListeners.push({
-					item,
-					listener
-				});
-				picker.appendChild(item);
-			}
-			const cancel = document.createElement("button");
-			cancel.textContent = "取消";
-			cancel.className = STYLE.pickerItemActive;
-			const cancelPicker = () => {
-				close();
-			};
-			cancel.addEventListener("click", cancelPicker);
-			panel.append(title, picker, cancel);
-			overlay.appendChild(panel);
-			document.body.appendChild(overlay);
-			return () => {
-				for (const { item, listener } of itemListeners) item.removeEventListener("click", listener);
-				cancel.removeEventListener("click", cancelPicker);
-				overlay.remove();
-			};
-		}
-		/** Compose every overlay with a single idempotent active inverse. */
-		function createOverlayHost(edit) {
-			let active;
-			const mount = (effect) => {
-				active?.();
-				let cleanup = () => {};
-				let mounted = true;
-				const close = () => {
-					if (!mounted) return;
-					mounted = false;
-					cleanup();
-					if (active === close) active = void 0;
-				};
-				active = close;
-				try {
-					cleanup = effect(close);
-				} catch (error) {
-					active = void 0;
-					mounted = false;
-					throw error;
-				}
-			};
-			const editBlock = (block) => {
-				mount((close) => mountEditor(block, edit, close));
-			};
-			const chooseBlock = (blocks) => {
-				mount((close) => mountPicker(blocks, (block) => {
-					close();
-					editBlock(block);
-				}, close));
-			};
-			return {
-				editBlock,
-				chooseBlock,
-				dispose: () => {
-					active?.();
-				}
-			};
-		}
-		/** Inject retry + edit icon buttons into each message action row. */
-		function InlineMessageEdit({ messages, edit, retry }) {
-			(0, react.useEffect)(() => {
-				const cleanups = [];
-				const overlays = createOverlayHost(edit);
-				let observer;
-				let alive = true;
-				let frame;
-				let scheduled = false;
-				const sync = () => {
-					const actionRows = Array.from(document.querySelectorAll("[class*=\"actions\"]"));
-					const claimedEvents = /* @__PURE__ */ new Set();
-					for (const row of actionRows) {
-						const marker = row;
-						if (marker.__messageEditInjected === true) {
-							if (marker.__messageEditEventSeq !== void 0) claimedEvents.add(marker.__messageEditEventSeq);
-							continue;
-						}
-						const text = (row.parentElement?.parentElement?.textContent ?? "").trim();
-						if (text.length === 0) continue;
-						const eventSeq = [...new Set(messages.filter((message) => message.text.length > 0 && text.includes(message.text.slice(0, 24))).map((message) => message.eventSeq))].find((candidate) => !claimedEvents.has(candidate));
-						if (eventSeq === void 0) continue;
-						const blocks = messages.filter((message) => message.eventSeq === eventSeq);
-						if (blocks.length === 0) continue;
-						const previousMarker = marker.__messageEditInjected;
-						const previousEventSeq = marker.__messageEditEventSeq;
-						marker.__messageEditInjected = true;
-						marker.__messageEditEventSeq = eventSeq;
-						claimedEvents.add(eventSeq);
-						const editButton = document.createElement("button");
-						editButton.className = STYLE.iconButton;
-						editButton.setAttribute("aria-label", "编辑消息");
-						editButton.title = "编辑消息";
-						editButton.appendChild(svgIcon(EDIT_PATH));
-						const editMessage = () => {
-							if (blocks.length === 1 && blocks[0] !== void 0) overlays.editBlock(blocks[0]);
-							else overlays.chooseBlock(blocks);
-						};
-						editButton.addEventListener("click", editMessage);
-						const retryButton = document.createElement("button");
-						retryButton.className = STYLE.iconButton;
-						retryButton.setAttribute("aria-label", "重试此回合");
-						retryButton.title = "重试此回合";
-						retryButton.appendChild(svgIcon(REFRESH_PATH));
-						const turn = blocks[0]?.turn;
-						const retryTurn = () => {
-							if (turn !== void 0) retry(turn, "truncate");
-						};
-						retryButton.addEventListener("click", retryTurn);
-						const lastOfficial = Array.from(row.querySelectorAll("button")).filter((button) => button !== editButton && button !== retryButton).at(-1);
-						if (lastOfficial !== void 0) {
-							lastOfficial.insertAdjacentElement("afterend", retryButton);
-							lastOfficial.insertAdjacentElement("afterend", editButton);
-						} else {
-							row.appendChild(editButton);
-							row.appendChild(retryButton);
-						}
-						cleanups.push(() => {
-							editButton.removeEventListener("click", editMessage);
-							retryButton.removeEventListener("click", retryTurn);
-							editButton.remove();
-							retryButton.remove();
-							if (previousMarker === void 0) delete marker.__messageEditInjected;
-							else marker.__messageEditInjected = previousMarker;
-							if (previousEventSeq === void 0) delete marker.__messageEditEventSeq;
-							else marker.__messageEditEventSeq = previousEventSeq;
-						});
-					}
-				};
-				sync();
-				observer = new MutationObserver(() => {
-					if (!alive || scheduled) return;
-					scheduled = true;
-					frame = requestAnimationFrame(() => {
-						frame = void 0;
-						scheduled = false;
-						if (alive) sync();
-					});
-				});
-				observer.observe(document.body, {
-					childList: true,
-					subtree: true
-				});
-				return () => {
-					alive = false;
-					if (frame !== void 0) cancelAnimationFrame(frame);
-					observer?.disconnect();
-					overlays.dispose();
-					for (const cleanup of cleanups.reverse()) cleanup();
-				};
-			}, [
-				messages,
-				edit,
-				retry
-			]);
-			return null;
-		}
-		//#endregion
-		//#region \0dsh-css:/home/moeblack/repos/dsh-message-edit/src/client/MessageEditHeader.module.css.mjs
-		const css$1 = ".nFunOq_root{align-items:center;gap:4px;display:inline-flex}.nFunOq_iconButton,.nFunOq_rerollButton{box-sizing:border-box;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:0 0;border:0}.nFunOq_iconButton{border-radius:50%;justify-content:center;align-items:center;width:28px;height:28px;font-size:16px;line-height:20px;display:inline-flex}.nFunOq_rerollButton{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;height:28px;padding:0 10px;font-size:12px;line-height:18px}.nFunOq_iconButton:hover:not(:disabled),.nFunOq_rerollButton:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.nFunOq_iconButton:focus-visible,.nFunOq_rerollButton:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.nFunOq_iconButton:disabled,.nFunOq_rerollButton:disabled{cursor:default;opacity:.4}.nFunOq_counter{min-width:108px;color:var(--dsw-alias-label-tertiary);text-align:center;font-size:11px;line-height:18px}@media (width<=760px){.nFunOq_counter{display:none}}";
-		const tagId$1 = "dsh-message-edit/MessageEditHeader.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-message-edit";
-			tag.dataset.pluginCss = tagId$1;
-			tag.textContent = css$1;
-			document.head.appendChild(tag);
-		}
-		var MessageEditHeader_module_css_default = {
-			"root": "nFunOq_root",
-			"counter": "nFunOq_counter",
-			"iconButton": "nFunOq_iconButton",
-			"rerollButton": "nFunOq_rerollButton"
-		};
-		//#endregion
-		//#region src/client/MessageEditHeader.tsx
-		/** Header contribution shared with the Timeline controller. */
-		function MessageEditHeader({ useMessageEdit, acquire, load, openVersion, reroll, edit, retry }) {
-			const state = useMessageEdit((value) => value);
-			(0, react.useEffect)(() => {
-				const release = acquire();
-				load();
-				return release;
-			}, [acquire, load]);
-			const timeline = state.timeline;
-			const versions = state.timeline?.versions ?? [];
-			const undoSessionId = timeline?.undoStack[0];
-			const redoSessionId = timeline?.redoSessionIds.at(-1);
-			const effectDepth = timeline?.undoStack.length ?? 0;
-			const busy = state.pending !== null || state.status !== "ready";
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(InlineMessageEdit, {
-				messages: state.status === "ready" && state.pending === null ? timeline?.messages ?? [] : [],
-				edit,
-				retry
-			}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: MessageEditHeader_module_css_default["root"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						className: MessageEditHeader_module_css_default["iconButton"],
-						"aria-label": "撤销当前版本效果",
-						title: "撤销当前效果，保留更早效果",
-						disabled: undoSessionId === void 0 || busy,
-						onClick: () => {
-							if (undoSessionId !== void 0) openVersion(undoSessionId);
-						},
-						children: "←"
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						className: MessageEditHeader_module_css_default["counter"],
-						children: versions.length === 0 ? "效果 —" : `效果 ${String(effectDepth)} 层 · ${String(versions.length)} 版`
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						className: MessageEditHeader_module_css_default["iconButton"],
-						"aria-label": "重施加下一版本效果",
-						title: timeline !== null && timeline.redoSessionIds.length > 1 ? `重施加最新效果（另有 ${String(timeline.redoSessionIds.length - 1)} 个分支）` : "重施加下一效果",
-						disabled: redoSessionId === void 0 || busy,
-						onClick: () => {
-							if (redoSessionId !== void 0) openVersion(redoSessionId);
-						},
-						children: "→"
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						className: MessageEditHeader_module_css_default["rerollButton"],
-						disabled: busy || state.timeline === null,
-						onClick: () => {
-							reroll();
-						},
-						children: state.pending === "reroll" ? "正在重生成…" : "重生成"
-					})
-				]
-			})] });
-		}
-		//#endregion
-		//#region \0dsh-css:/home/moeblack/repos/dsh-message-edit/src/client/MessageEditTimelineView.module.css.mjs
-		const css = ".i5o6sG_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.i5o6sG_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.i5o6sG_title,.i5o6sG_intro,.i5o6sG_subtitle,.i5o6sG_notice,.i5o6sG_error,.i5o6sG_empty,.i5o6sG_turnTitle,.i5o6sG_turnPreview,.i5o6sG_messageText{margin:0}.i5o6sG_title{font-size:22px;font-weight:600;line-height:30px}.i5o6sG_intro{max-width:700px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:13px;line-height:20px}.i5o6sG_headerActions{flex:none;align-items:flex-end;gap:8px;display:flex}.i5o6sG_cascadeField{color:var(--dsw-alias-label-secondary);flex-direction:column;gap:4px;font-size:11px;line-height:16px;display:flex}.i5o6sG_select,.i5o6sG_textarea,.i5o6sG_primaryButton,.i5o6sG_secondaryButton,.i5o6sG_textButton,.i5o6sG_versionButton{box-sizing:border-box;font:inherit}.i5o6sG_select,.i5o6sG_textarea{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border-radius:8px}.i5o6sG_select{height:34px;padding:0 30px 0 9px;font-size:12px}.i5o6sG_primaryButton,.i5o6sG_secondaryButton,.i5o6sG_textButton,.i5o6sG_versionButton{cursor:pointer;border:0}.i5o6sG_primaryButton,.i5o6sG_secondaryButton{border-radius:17px;justify-content:center;align-items:center;min-height:34px;padding:0 13px;font-size:12px;line-height:18px;display:inline-flex}.i5o6sG_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.i5o6sG_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.i5o6sG_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.i5o6sG_secondaryButton:hover:not(:disabled),.i5o6sG_textButton:hover:not(:disabled),.i5o6sG_versionButton:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.i5o6sG_primaryButton:disabled,.i5o6sG_secondaryButton:disabled,.i5o6sG_textButton:disabled,.i5o6sG_versionButton:disabled,.i5o6sG_select:disabled{cursor:default;opacity:.45}.i5o6sG_primaryButton:focus-visible,.i5o6sG_secondaryButton:focus-visible,.i5o6sG_textButton:focus-visible,.i5o6sG_versionButton:focus-visible,.i5o6sG_select:focus-visible,.i5o6sG_textarea:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.i5o6sG_notice,.i5o6sG_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.i5o6sG_notice{color:var(--dsw-alias-state-warn-label)}.i5o6sG_error{color:var(--dsw-alias-state-error-primary)}.i5o6sG_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.i5o6sG_status .i5o6sG_error{margin:0}.i5o6sG_columns{grid-template-columns:minmax(280px,.72fr) minmax(520px,1.75fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.i5o6sG_versionsPanel,.i5o6sG_turnsPanel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.i5o6sG_versionsPanel{position:sticky;top:0}.i5o6sG_sectionHeading{justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;display:flex}.i5o6sG_effectControls{background:var(--dsw-alias-bg-module-platform);border-radius:9px;flex-direction:column;gap:8px;margin-bottom:12px;padding:10px;display:flex}.i5o6sG_effectDepth{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:17px}.i5o6sG_effectButtons{flex-wrap:wrap;gap:6px;display:flex}.i5o6sG_effectButtons .i5o6sG_secondaryButton{min-height:28px;padding:0 10px;font-size:11px}.i5o6sG_subtitle{font-size:16px;font-weight:500;line-height:24px}.i5o6sG_count{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.i5o6sG_versionList,.i5o6sG_turnList{margin:0;padding:0;list-style:none}.i5o6sG_versionList{flex-direction:column;gap:4px;display:flex}.i5o6sG_versionItem{--message-edit-depth:0;padding-left:calc(var(--message-edit-depth) * 14px);position:relative}.i5o6sG_versionButton{width:100%;min-width:0;color:var(--dsw-alias-label-secondary);text-align:left;background:0 0;border-radius:9px;align-items:flex-start;gap:9px;padding:9px;display:flex;position:relative}.i5o6sG_versionButton[data-current]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);opacity:1}.i5o6sG_versionButton:not([data-current]) .i5o6sG_pathBadge{opacity:.8}.i5o6sG_versionLine{background:var(--dsw-alias-border-l2);width:1px;position:absolute;top:0;bottom:0;left:14px}.i5o6sG_versionDot{z-index:1;border:2px solid var(--dsw-alias-bg-layer-1);background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:7px;height:7px;margin-top:6px}.i5o6sG_versionButton[data-current] .i5o6sG_versionDot{border-color:var(--dsw-alias-bg-module-platform);background:var(--dsw-alias-brand-primary)}.i5o6sG_versionMain{flex-direction:column;flex:1;min-width:0;display:flex}.i5o6sG_versionTitle{text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;line-height:20px;overflow:hidden}.i5o6sG_versionMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:16px;overflow:hidden}.i5o6sG_versionDiff{color:var(--dsw-alias-label-tertiary);flex-direction:column;gap:2px;margin-top:5px;font-size:10px;line-height:15px;display:flex}.i5o6sG_versionDiff span{-webkit-line-clamp:2;white-space:pre-wrap;overflow-wrap:anywhere;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.i5o6sG_currentBadge,.i5o6sG_pathBadge,.i5o6sG_kindBadge{border-radius:9px;flex:none;padding:1px 6px;font-size:10px;line-height:17px}.i5o6sG_currentBadge{color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1)}.i5o6sG_pathBadge{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}.i5o6sG_turnList{flex-direction:column;gap:14px;display:flex}.i5o6sG_turnSection{border:1px solid var(--dsw-alias-border-l2);border-radius:11px;padding:13px}.i5o6sG_turnHeader,.i5o6sG_messageHeader,.i5o6sG_editorActions{justify-content:space-between;align-items:center;gap:10px;display:flex}.i5o6sG_turnHeader{border-bottom:1px solid var(--dsw-alias-border-l2);align-items:flex-start;padding-bottom:11px}.i5o6sG_turnTitle{font-size:14px;font-weight:500;line-height:22px}.i5o6sG_turnPreview{max-width:700px;color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:2;white-space:pre-wrap;-webkit-box-orient:vertical;font-size:11px;line-height:17px;display:-webkit-box;overflow:hidden}.i5o6sG_messageList{flex-direction:column;gap:8px;margin-top:10px;display:flex}.i5o6sG_messageCard{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:10px}.i5o6sG_messageHeader{justify-content:flex-start}.i5o6sG_kindBadge{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1)}.i5o6sG_kindBadge[data-kind=assistant\\.reasoning]{color:var(--dsw-alias-label-tertiary)}.i5o6sG_messageTime{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:17px}.i5o6sG_textButton{color:var(--dsw-alias-label-secondary);background:0 0;border-radius:12px;margin-left:auto;padding:3px 8px;font-size:11px;line-height:17px}.i5o6sG_messageText{max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin-top:7px;font-family:inherit;font-size:12px;line-height:19px;overflow:auto}.i5o6sG_editor{margin-top:8px}.i5o6sG_textarea{resize:vertical;width:100%;min-height:120px;padding:9px;font-size:12px;line-height:19px}.i5o6sG_editorActions{margin-top:8px}.i5o6sG_editorHint{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}.i5o6sG_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:13px;line-height:20px}@media (width<=1000px){.i5o6sG_columns{grid-template-columns:1fr}.i5o6sG_versionsPanel{position:static}}@media (width<=680px){.i5o6sG_root{padding:16px}.i5o6sG_pageHeader,.i5o6sG_headerActions,.i5o6sG_turnHeader,.i5o6sG_editorActions{flex-direction:column;align-items:stretch}.i5o6sG_headerActions,.i5o6sG_primaryButton,.i5o6sG_secondaryButton{width:100%}}";
-		const tagId = "dsh-message-edit/MessageEditTimelineView.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-message-edit";
-			tag.dataset.pluginCss = tagId;
-			tag.textContent = css;
-			document.head.appendChild(tag);
-		}
-		var MessageEditTimelineView_module_css_default = {
-			"status": "i5o6sG_status",
-			"turnPreview": "i5o6sG_turnPreview",
-			"title": "i5o6sG_title",
-			"root": "i5o6sG_root",
-			"turnTitle": "i5o6sG_turnTitle",
-			"versionMeta": "i5o6sG_versionMeta",
-			"versionItem": "i5o6sG_versionItem",
-			"versionTitle": "i5o6sG_versionTitle",
-			"messageTime": "i5o6sG_messageTime",
-			"select": "i5o6sG_select",
-			"turnList": "i5o6sG_turnList",
-			"cascadeField": "i5o6sG_cascadeField",
-			"textarea": "i5o6sG_textarea",
-			"error": "i5o6sG_error",
-			"pageHeader": "i5o6sG_pageHeader",
-			"turnsPanel": "i5o6sG_turnsPanel",
-			"versionLine": "i5o6sG_versionLine",
-			"turnHeader": "i5o6sG_turnHeader",
-			"messageList": "i5o6sG_messageList",
-			"messageCard": "i5o6sG_messageCard",
-			"secondaryButton": "i5o6sG_secondaryButton",
-			"columns": "i5o6sG_columns",
-			"editorActions": "i5o6sG_editorActions",
-			"notice": "i5o6sG_notice",
-			"textButton": "i5o6sG_textButton",
-			"empty": "i5o6sG_empty",
-			"intro": "i5o6sG_intro",
-			"effectButtons": "i5o6sG_effectButtons",
-			"effectDepth": "i5o6sG_effectDepth",
-			"pathBadge": "i5o6sG_pathBadge",
-			"count": "i5o6sG_count",
-			"versionDiff": "i5o6sG_versionDiff",
-			"headerActions": "i5o6sG_headerActions",
-			"currentBadge": "i5o6sG_currentBadge",
-			"subtitle": "i5o6sG_subtitle",
-			"versionDot": "i5o6sG_versionDot",
-			"primaryButton": "i5o6sG_primaryButton",
-			"versionsPanel": "i5o6sG_versionsPanel",
-			"versionMain": "i5o6sG_versionMain",
-			"turnSection": "i5o6sG_turnSection",
-			"messageHeader": "i5o6sG_messageHeader",
-			"kindBadge": "i5o6sG_kindBadge",
-			"editor": "i5o6sG_editor",
-			"versionButton": "i5o6sG_versionButton",
-			"sectionHeading": "i5o6sG_sectionHeading",
-			"editorHint": "i5o6sG_editorHint",
-			"versionList": "i5o6sG_versionList",
-			"effectControls": "i5o6sG_effectControls",
-			"messageText": "i5o6sG_messageText"
-		};
-		//#endregion
-		//#region src/client/MessageEditTimelineView.tsx
-		/** Timeline tab: durable version tree plus turn/block edit and retry controls. */
-		const BLOCK_LABEL = {
-			user: "用户消息",
-			"assistant.reasoning": "助手思考",
-			"assistant.response": "助手回复"
-		};
-		const OPERATION_LABEL = {
-			edit: "编辑",
-			reroll: "重生成",
-			retry: "重试"
-		};
-		function timeLabel(value) {
-			return new Date(value).toLocaleString("zh-CN", {
-				month: "2-digit",
-				day: "2-digit",
-				hour: "2-digit",
-				minute: "2-digit",
-				second: "2-digit"
-			});
-		}
-		function turnSections(turns, messages) {
-			return turns.map((retry) => ({
-				retry,
-				messages: messages.filter((message) => message.turn === retry.turn)
-			}));
-		}
-		function VersionRow({ version, disabled, onOpen }) {
-			const depthStyle = { "--message-edit-depth": String(version.depth) };
-			const operation = version.operation === void 0 ? version.parentSessionId === void 0 ? "原始版本" : "外部分支" : OPERATION_LABEL[version.operation];
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("li", {
-				className: MessageEditTimelineView_module_css_default["versionItem"],
-				style: depthStyle,
-				children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-					type: "button",
-					className: MessageEditTimelineView_module_css_default["versionButton"],
-					"data-current": version.current || void 0,
-					disabled: version.current || disabled,
-					onClick: () => {
-						onOpen(version.sessionId);
-					},
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["versionLine"],
-							"aria-hidden": true
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["versionDot"],
-							"aria-hidden": true
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							className: MessageEditTimelineView_module_css_default["versionMain"],
-							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-									className: MessageEditTimelineView_module_css_default["versionTitle"],
-									children: [operation, version.targetTurn === void 0 ? null : ` · 回合 ${String(version.targetTurn)}`]
-								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-									className: MessageEditTimelineView_module_css_default["versionMeta"],
-									children: [
-										timeLabel(version.createdAt),
-										" · ",
-										version.sessionId.slice(0, 12)
-									]
-								}),
-								version.before === void 0 && version.after === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-									className: MessageEditTimelineView_module_css_default["versionDiff"],
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["原：", version.before || "（空）"] }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["新：", version.after || "（空）"] })]
-								})
-							]
-						}),
-						version.current ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["currentBadge"],
-							children: "当前"
-						}) : version.onCurrentEffectPath ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["pathBadge"],
-							children: "链上"
-						}) : null
-					]
-				})
-			});
-		}
-		function MessageCard({ message, editing, disabled, cascade, onBeginEdit, onCancelEdit, onTextChange, onApplyEdit }) {
-			const active = editing?.message.key === message.key;
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("article", {
-				className: MessageEditTimelineView_module_css_default["messageCard"],
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: MessageEditTimelineView_module_css_default["messageHeader"],
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["kindBadge"],
-							"data-kind": message.kind,
-							children: BLOCK_LABEL[message.kind]
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["messageTime"],
-							children: timeLabel(message.time)
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: MessageEditTimelineView_module_css_default["textButton"],
-							disabled,
-							onClick: () => {
-								active ? onCancelEdit() : onBeginEdit(message);
-							},
-							children: active ? "取消" : "编辑"
-						})
-					]
-				}), active && editing !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: MessageEditTimelineView_module_css_default["editor"],
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("textarea", {
-						className: MessageEditTimelineView_module_css_default["textarea"],
-						value: editing.text,
-						rows: 6,
-						autoFocus: true,
-						onChange: (event) => {
-							onTextChange(event.currentTarget.value);
-						}
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: MessageEditTimelineView_module_css_default["editorActions"],
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: MessageEditTimelineView_module_css_default["editorHint"],
-							children: "将从该回合之前分支，原版本保持不变。"
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: MessageEditTimelineView_module_css_default["primaryButton"],
-							disabled,
-							onClick: () => {
-								onApplyEdit(message, editing.text, cascade);
-							},
-							children: "应用并重生成"
-						})]
-					})]
-				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
-					className: MessageEditTimelineView_module_css_default["messageText"],
-					children: message.text || "（空内容）"
-				})]
-			});
-		}
-		/** Conversation-view entry point. */
-		function MessageEditTimelineView({ useMessageEdit, acquire, load, edit, retry, reroll, openVersion }) {
-			const state = useMessageEdit((value) => value);
-			const [cascade, setCascade] = (0, react.useState)("truncate");
-			const [editing, setEditing] = (0, react.useState)(null);
-			(0, react.useEffect)(() => {
-				const release = acquire();
-				load();
-				return release;
-			}, [acquire, load]);
-			const timeline = state.timeline;
-			const sections = (0, react.useMemo)(() => timeline === null ? [] : turnSections(timeline.retryableTurns, timeline.messages), [timeline]);
-			const busy = state.pending !== null || state.status !== "ready";
-			(0, react.useEffect)(() => {
-				setEditing((current) => {
-					if (current === null || timeline === null) return current;
-					return timeline.messages.some((message) => message.key === current.message.key) ? current : null;
-				});
-			}, [timeline]);
-			if (timeline === null && (state.status === "idle" || state.status === "loading")) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-				className: MessageEditTimelineView_module_css_default["status"],
-				children: "正在载入消息时间线…"
-			});
-			if (timeline === null && state.status === "error") return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: MessageEditTimelineView_module_css_default["status"],
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-					className: MessageEditTimelineView_module_css_default["error"],
-					children: state.error
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-					type: "button",
-					className: MessageEditTimelineView_module_css_default["secondaryButton"],
-					onClick: load,
-					children: "重新载入"
-				})]
-			});
-			if (timeline === null) return null;
-			const applyEdit = (message, text, policy) => {
-				setEditing(null);
-				edit(message, text, policy);
-			};
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: MessageEditTimelineView_module_css_default["root"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-						className: MessageEditTimelineView_module_css_default["pageHeader"],
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h1", {
-							className: MessageEditTimelineView_module_css_default["title"],
-							children: "消息编辑与重生成"
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: MessageEditTimelineView_module_css_default["intro"],
-							children: "每次修改都会与其恢复版本成对记录；回合及其完整工具链作为一个整体重新计算。"
-						})] }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							className: MessageEditTimelineView_module_css_default["headerActions"],
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
-								className: MessageEditTimelineView_module_css_default["cascadeField"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "后续策略" }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
-									className: MessageEditTimelineView_module_css_default["select"],
-									value: cascade,
-									disabled: busy,
-									onChange: (event) => {
-										setCascade(event.currentTarget.value);
-									},
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-										value: "truncate",
-										children: "截断后续（默认）"
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-										value: "preserve",
-										children: "保留输入并重生成后续"
-									})]
-								})]
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: MessageEditTimelineView_module_css_default["primaryButton"],
-								disabled: busy,
-								onClick: () => {
-									reroll();
-								},
-								children: state.pending === "reroll" ? "正在重生成…" : "重生成最后回复"
-							})]
-						})]
-					}),
-					state.error === null ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: MessageEditTimelineView_module_css_default["error"],
-						children: state.error
-					}),
-					state.status === "loading" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: MessageEditTimelineView_module_css_default["notice"],
-						children: "正在刷新时间线…"
-					}) : null,
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: MessageEditTimelineView_module_css_default["columns"],
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
-							className: MessageEditTimelineView_module_css_default["versionsPanel"],
-							"aria-label": "版本时间线",
-							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-									className: MessageEditTimelineView_module_css_default["sectionHeading"],
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
-										className: MessageEditTimelineView_module_css_default["subtitle"],
-										children: "版本时间线"
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-										className: MessageEditTimelineView_module_css_default["count"],
-										children: String(timeline.versions.length)
-									})]
-								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-									className: MessageEditTimelineView_module_css_default["effectControls"],
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-										className: MessageEditTimelineView_module_css_default["effectDepth"],
-										children: [
-											"当前效果链 ",
-											String(timeline.undoStack.length),
-											" 层"
-										]
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-										className: MessageEditTimelineView_module_css_default["effectButtons"],
-										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-											type: "button",
-											className: MessageEditTimelineView_module_css_default["secondaryButton"],
-											disabled: busy || timeline.undoStack[0] === void 0,
-											onClick: () => {
-												const target = timeline.undoStack[0];
-												if (target !== void 0) openVersion(target);
-											},
-											children: "撤销当前效果"
-										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-											type: "button",
-											className: MessageEditTimelineView_module_css_default["secondaryButton"],
-											disabled: busy || timeline.redoSessionIds.length === 0,
-											onClick: () => {
-												const target = timeline.redoSessionIds.at(-1);
-												if (target !== void 0) openVersion(target);
-											},
-											children: timeline.redoSessionIds.length > 1 ? `重施加最新分支（${String(timeline.redoSessionIds.length)}）` : "重施加下一效果"
-										})]
-									})]
-								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ol", {
-									className: MessageEditTimelineView_module_css_default["versionList"],
-									children: timeline.versions.map((version) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(VersionRow, {
-										version,
-										disabled: busy,
-										onOpen: (sessionId) => {
-											openVersion(sessionId);
-										}
-									}, version.sessionId))
-								})
-							]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
-							className: MessageEditTimelineView_module_css_default["turnsPanel"],
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: MessageEditTimelineView_module_css_default["sectionHeading"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
-									className: MessageEditTimelineView_module_css_default["subtitle"],
-									children: "已落定消息"
-								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: MessageEditTimelineView_module_css_default["count"],
-									children: String(timeline.messages.length)
-								})]
-							}), sections.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-								className: MessageEditTimelineView_module_css_default["empty"],
-								children: "当前会话还没有可编辑的已落定回合。"
-							}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ol", {
-								className: MessageEditTimelineView_module_css_default["turnList"],
-								children: sections.map((section) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
-									className: MessageEditTimelineView_module_css_default["turnSection"],
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-										className: MessageEditTimelineView_module_css_default["turnHeader"],
-										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("h3", {
-											className: MessageEditTimelineView_module_css_default["turnTitle"],
-											children: ["回合 ", String(section.retry.turn)]
-										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-											className: MessageEditTimelineView_module_css_default["turnPreview"],
-											children: section.retry.preview || "（空用户输入）"
-										})] }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-											type: "button",
-											className: MessageEditTimelineView_module_css_default["secondaryButton"],
-											disabled: busy,
-											onClick: () => {
-												retry(section.retry.turn, cascade);
-											},
-											children: state.pending === "retry" ? "正在重试…" : "重试此回合"
-										})]
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-										className: MessageEditTimelineView_module_css_default["messageList"],
-										children: section.messages.map((message) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MessageCard, {
-											message,
-											editing,
-											disabled: busy,
-											cascade,
-											onBeginEdit: (value) => {
-												setEditing({
-													message: value,
-													text: value.text
-												});
-											},
-											onCancelEdit: () => {
-												setEditing(null);
-											},
-											onTextChange: (text) => {
-												setEditing((current) => current === null ? null : {
-													...current,
-													text
-												});
-											},
-											onApplyEdit: applyEdit
-										}, message.key))
-									})]
-								}, section.retry.turn))
-							})]
-						})]
-					})
-				]
-			});
-		}
-		//#endregion
-		//#region src/client/index.ts
-		/** Explicit value sources and slot declaration-order edges. */
-		const inject = [
-			"slots",
-			"conversation",
-			"connection",
-			"sessions"
-		];
-		/** Register both UI contributions over one per-session controller identity. */
-		function apply(ctx) {
-			const controllers = /* @__PURE__ */ new Map();
-			const controllerFor = (sessionId) => {
-				let controller = controllers.get(sessionId);
-				if (controller === void 0) {
-					controller = new MessageEditController(ctx, sessionId);
-					controllers.set(sessionId, controller);
-				}
-				return controller;
-			};
-			ctx.on("connection/reset", () => {
-				for (const controller of controllers.values()) controller.refreshIfLoaded();
-			});
-			ctx.slots.register({
-				name: "conversation.view",
-				id: "message-edit-timeline",
-				order: 15,
-				label: "Timeline",
-				inject: (sessionId) => controllerFor(sessionId).face
-			}, MessageEditTimelineView);
-			ctx.slots.register({
-				name: "conversation.session.header.actions",
-				id: "message-edit-controls",
-				order: 15,
-				inject: (sessionId) => controllerFor(sessionId).face
-			}, MessageEditHeader);
-		}
-		//#endregion
-		exports.apply = apply;
-		exports.inject = inject;
-		return module.exports;
-	}
-});
+window.__ModuleLoader__.load({ id: "dsh-message-edit", factory: (require) => {
+var module = { exports: {} }; var exports = module.exports;
+"use strict";
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// src/client/index.ts
+var index_exports = {};
+__export(index_exports, {
+  apply: () => apply,
+  inject: () => inject
+});
+module.exports = __toCommonJS(index_exports);
+
+// src/shared.ts
+var MESSAGE_EDIT_PATH = "/message-edit";
+var MESSAGE_EDIT_VIEW_ORDER = 15;
+
+// src/client/AssistantMessageActions.tsx
+var import_react = require("react");
+
+// src/client/InlineMessageEdit.module.css
+var css = ".UVOEXq_overlay{z-index:1000;background:var(--dsw-alias-bg-mask,#00000073);justify-content:center;align-items:center;display:flex;position:fixed;inset:0}.UVOEXq_panel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:10px;width:560px;padding:14px 16px}.UVOEXq_title{color:var(--dsw-alias-label-primary);padding:4px 0 10px;font-size:13px}.UVOEXq_input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);width:100%;min-height:160px;color:var(--dsw-alias-label-primary);font:inherit;resize:vertical;border-radius:8px;padding:10px}.UVOEXq_footer{justify-content:flex-end;gap:8px;padding:10px 0 0;display:flex}.UVOEXq_footer button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;padding:6px 14px}.UVOEXq_iconButton{width:20px;height:20px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.UVOEXq_iconButton:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-hover)}.UVOEXq_picker{flex-direction:column;gap:6px;padding:4px 0 12px;display:flex}.UVOEXq_pickerItem{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;border-radius:6px;padding:8px 10px;font-size:12px}.UVOEXq_pickerItem:hover{background:var(--dsw-alias-bg-module-platform)}.UVOEXq_pickerItemActive{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-hover);color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;align-self:flex-end;padding:6px 14px}";
+var tagId = "dsh-message-edit/InlineMessageEdit.module.css";
+if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
+  const tag = document.createElement("style");
+  tag.dataset.plugin = "dsh-message-edit";
+  tag.dataset.pluginCss = tagId;
+  tag.textContent = css;
+  document.head.appendChild(tag);
+}
+var InlineMessageEdit_default = { "iconButton": "UVOEXq_iconButton", "pickerItem": "UVOEXq_pickerItem", "title": "UVOEXq_title", "footer": "UVOEXq_footer", "panel": "UVOEXq_panel", "picker": "UVOEXq_picker", "input": "UVOEXq_input", "overlay": "UVOEXq_overlay", "pickerItemActive": "UVOEXq_pickerItemActive" };
+
+// src/client/overlay.ts
+var BLOCK_TITLE = {
+  user: "\u7F16\u8F91\u7528\u6237\u6D88\u606F",
+  "assistant.reasoning": "\u7F16\u8F91\u52A9\u624B\u601D\u8003",
+  "assistant.response": "\u7F16\u8F91\u52A9\u624B\u56DE\u590D"
+};
+var STYLE = {
+  overlay: InlineMessageEdit_default["overlay"] ?? "",
+  panel: InlineMessageEdit_default["panel"] ?? "",
+  title: InlineMessageEdit_default["title"] ?? "",
+  input: InlineMessageEdit_default["input"] ?? "",
+  footer: InlineMessageEdit_default["footer"] ?? "",
+  iconButton: InlineMessageEdit_default["iconButton"] ?? "",
+  picker: InlineMessageEdit_default["picker"] ?? "",
+  pickerItem: InlineMessageEdit_default["pickerItem"] ?? "",
+  pickerItemActive: InlineMessageEdit_default["pickerItemActive"] ?? ""
+};
+var REFRESH_PATH = "M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z";
+var EDIT_PATH = "M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z";
+function blockTitle(kind) {
+  return BLOCK_TITLE[kind] ?? "\u7F16\u8F91\u6D88\u606F";
+}
+function svgIcon(path) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("d", path);
+  p.setAttribute("fill", "currentColor");
+  svg.appendChild(p);
+  return svg;
+}
+function mountEditor(block, edit, close) {
+  const overlay = document.createElement("div");
+  overlay.className = STYLE.overlay;
+  const panel = document.createElement("div");
+  panel.className = STYLE.panel;
+  const title = document.createElement("div");
+  title.className = STYLE.title;
+  title.textContent = blockTitle(block.kind);
+  const input = document.createElement("textarea");
+  input.className = STYLE.input;
+  input.value = block.text;
+  const footer = document.createElement("div");
+  footer.className = STYLE.footer;
+  const save = document.createElement("button");
+  save.textContent = "\u4FDD\u5B58";
+  const cancel = document.createElement("button");
+  cancel.textContent = "\u53D6\u6D88";
+  footer.append(save, cancel);
+  panel.append(title, input, footer);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  let mounted = true;
+  let saving = false;
+  const saveEdit = () => {
+    if (saving) return;
+    saving = true;
+    save.disabled = true;
+    void edit(block, input.value, "truncate").then((applied) => {
+      if (!mounted) return;
+      if (applied) {
+        close();
+        return;
+      }
+      saving = false;
+      save.disabled = false;
+    });
+  };
+  const cancelEdit = () => {
+    close();
+  };
+  const dismiss = (event) => {
+    if (event.target === overlay) close();
+  };
+  save.addEventListener("click", saveEdit);
+  cancel.addEventListener("click", cancelEdit);
+  overlay.addEventListener("click", dismiss);
+  return () => {
+    mounted = false;
+    save.removeEventListener("click", saveEdit);
+    cancel.removeEventListener("click", cancelEdit);
+    overlay.removeEventListener("click", dismiss);
+    overlay.remove();
+  };
+}
+function mountPicker(blocks, select, close) {
+  const overlay = document.createElement("div");
+  overlay.className = STYLE.overlay;
+  const panel = document.createElement("div");
+  panel.className = STYLE.panel;
+  const title = document.createElement("div");
+  title.className = STYLE.title;
+  title.textContent = blocks.some((block) => block.kind === "user") ? "\u7F16\u8F91\u6D88\u606F" : "\u7F16\u8F91\u52A9\u624B\u6D88\u606F";
+  const picker = document.createElement("div");
+  picker.className = STYLE.picker;
+  const itemListeners = [];
+  for (const block of blocks) {
+    const item = document.createElement("button");
+    item.className = STYLE.pickerItem;
+    item.textContent = `${blockTitle(block.kind)}\uFF1A${block.text.slice(0, 24)}${block.text.length > 24 ? "\u2026" : ""}`;
+    const listener = () => {
+      select(block);
+    };
+    item.addEventListener("click", listener);
+    itemListeners.push({ item, listener });
+    picker.appendChild(item);
+  }
+  const cancel = document.createElement("button");
+  cancel.textContent = "\u53D6\u6D88";
+  cancel.className = STYLE.pickerItemActive;
+  const cancelPicker = () => {
+    close();
+  };
+  cancel.addEventListener("click", cancelPicker);
+  panel.append(title, picker, cancel);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  return () => {
+    for (const { item, listener } of itemListeners) item.removeEventListener("click", listener);
+    cancel.removeEventListener("click", cancelPicker);
+    overlay.remove();
+  };
+}
+function createOverlayHost(edit) {
+  let active;
+  const mount = (effect) => {
+    active?.();
+    let cleanup = () => {
+    };
+    let mounted = true;
+    const close = () => {
+      if (!mounted) return;
+      mounted = false;
+      cleanup();
+      if (active === close) active = void 0;
+    };
+    active = close;
+    try {
+      cleanup = effect(close);
+    } catch (error) {
+      active = void 0;
+      mounted = false;
+      throw error;
+    }
+  };
+  const editBlock = (block) => {
+    mount((close) => mountEditor(block, edit, close));
+  };
+  const chooseBlock = (blocks) => {
+    mount((close) => mountPicker(blocks, (block) => {
+      close();
+      editBlock(block);
+    }, close));
+  };
+  return {
+    editBlock,
+    chooseBlock,
+    dispose: () => {
+      active?.();
+    }
+  };
+}
+
+// src/client/AssistantMessageActions.tsx
+var import_jsx_runtime = require("react/jsx-runtime");
+function Icon({ path }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("svg", { width: "16", height: "16", viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", { d: path, fill: "currentColor" }) });
+}
+function AssistantMessageActions({
+  messageId,
+  useMessageEdit,
+  acquire,
+  load,
+  edit,
+  retry
+}) {
+  const state = useMessageEdit((value) => value);
+  (0, import_react.useEffect)(() => {
+    const release = acquire();
+    load();
+    return release;
+  }, [acquire, load]);
+  const blocks = (0, import_react.useMemo)(
+    () => (state.timeline?.messages ?? []).filter((message) => message.messageId === messageId),
+    [state.timeline, messageId]
+  );
+  const overlays = (0, import_react.useMemo)(() => createOverlayHost(edit), [edit]);
+  (0, import_react.useEffect)(() => () => overlays.dispose(), [overlays]);
+  if (blocks.length === 0) return null;
+  const turn = blocks[0]?.turn;
+  const editMessage = () => {
+    if (blocks.length === 1 && blocks[0] !== void 0) overlays.editBlock(blocks[0]);
+    else overlays.chooseBlock(blocks);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      "button",
+      {
+        type: "button",
+        className: InlineMessageEdit_default["iconButton"],
+        "aria-label": "\u7F16\u8F91\u6D88\u606F",
+        title: "\u7F16\u8F91\u6D88\u606F",
+        onClick: editMessage,
+        children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Icon, { path: EDIT_PATH })
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      "button",
+      {
+        type: "button",
+        className: InlineMessageEdit_default["iconButton"],
+        "aria-label": "\u91CD\u8BD5\u6B64\u56DE\u5408",
+        title: "\u91CD\u8BD5\u6B64\u56DE\u5408",
+        onClick: () => {
+          if (turn !== void 0) void retry(turn, "truncate");
+        },
+        children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Icon, { path: REFRESH_PATH })
+      }
+    )
+  ] });
+}
+
+// src/client/controller.ts
+var import_client = require("@deepseek-ai/dsh-client-runtime/client");
+var REFRESH_DELAY_MS = 300;
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function objectValue(value, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label} \u4E0D\u662F\u5BF9\u8C61`);
+  }
+  return value;
+}
+function stringValue(value, label) {
+  if (typeof value !== "string") throw new TypeError(`${label} \u4E0D\u662F\u5B57\u7B26\u4E32`);
+  return value;
+}
+function numberValue(value, label) {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${label} \u4E0D\u662F\u6570\u5B57`);
+  return value;
+}
+function booleanValue(value, label) {
+  if (typeof value !== "boolean") throw new TypeError(`${label} \u4E0D\u662F\u5E03\u5C14\u503C`);
+  return value;
+}
+function blockKind(value) {
+  if (value !== "user" && value !== "assistant.reasoning" && value !== "assistant.response") {
+    throw new TypeError("\u6D88\u606F\u5757\u7C7B\u578B\u65E0\u6548");
+  }
+  return value;
+}
+function decodeMessage(value, index) {
+  const row = objectValue(value, `messages[${String(index)}]`);
+  return {
+    key: stringValue(row["key"], "\u6D88\u606F key"),
+    turn: numberValue(row["turn"], "\u6D88\u606F turn"),
+    eventSeq: numberValue(row["eventSeq"], "\u6D88\u606F eventSeq"),
+    blockIndex: numberValue(row["blockIndex"], "\u6D88\u606F blockIndex"),
+    kind: blockKind(row["kind"]),
+    text: stringValue(row["text"], "\u6D88\u606F text"),
+    time: numberValue(row["time"], "\u6D88\u606F time"),
+    ...row["messageId"] === void 0 ? {} : { messageId: stringValue(row["messageId"], "\u6D88\u606F messageId") }
+  };
+}
+function decodeRetryable(value, index) {
+  const row = objectValue(value, `retryableTurns[${String(index)}]`);
+  return {
+    turn: numberValue(row["turn"], "\u56DE\u5408 turn"),
+    userEventSeq: numberValue(row["userEventSeq"], "\u56DE\u5408 userEventSeq"),
+    preview: stringValue(row["preview"], "\u56DE\u5408 preview"),
+    time: numberValue(row["time"], "\u56DE\u5408 time")
+  };
+}
+function optionalOperation(value) {
+  if (value === void 0) return void 0;
+  if (value === "edit" || value === "reroll" || value === "retry") return value;
+  throw new TypeError("\u7248\u672C operation \u65E0\u6548");
+}
+function decodeVersion(value, index) {
+  const row = objectValue(value, `versions[${String(index)}]`);
+  const operation = optionalOperation(row["operation"]);
+  const cascade = row["cascade"];
+  if (cascade !== void 0 && cascade !== "truncate" && cascade !== "preserve") {
+    throw new TypeError("\u7248\u672C cascade \u65E0\u6548");
+  }
+  const kind = row["blockKind"] === void 0 ? void 0 : blockKind(row["blockKind"]);
+  return {
+    sessionId: stringValue(row["sessionId"], "\u7248\u672C sessionId"),
+    ...row["parentSessionId"] === void 0 ? {} : { parentSessionId: stringValue(row["parentSessionId"], "\u7248\u672C parentSessionId") },
+    ...row["effectId"] === void 0 ? {} : { effectId: stringValue(row["effectId"], "\u7248\u672C effectId") },
+    ...row["inverseSessionId"] === void 0 ? {} : { inverseSessionId: stringValue(row["inverseSessionId"], "\u7248\u672C inverseSessionId") },
+    createdAt: numberValue(row["createdAt"], "\u7248\u672C createdAt"),
+    depth: numberValue(row["depth"], "\u7248\u672C depth"),
+    current: booleanValue(row["current"], "\u7248\u672C current"),
+    onCurrentEffectPath: booleanValue(row["onCurrentEffectPath"], "\u7248\u672C onCurrentEffectPath"),
+    ...operation === void 0 ? {} : { operation },
+    ...cascade === void 0 ? {} : { cascade },
+    ...row["targetTurn"] === void 0 ? {} : { targetTurn: numberValue(row["targetTurn"], "\u7248\u672C targetTurn") },
+    ...kind === void 0 ? {} : { blockKind: kind },
+    ...row["before"] === void 0 ? {} : { before: stringValue(row["before"], "\u7248\u672C before") },
+    ...row["after"] === void 0 ? {} : { after: stringValue(row["after"], "\u7248\u672C after") }
+  };
+}
+function arrayValue(value, label) {
+  if (!Array.isArray(value)) throw new TypeError(`${label} \u4E0D\u662F\u6570\u7EC4`);
+  return value;
+}
+function stringArray(value, label) {
+  return arrayValue(value, label).map((item, index) => stringValue(item, `${label}[${String(index)}]`));
+}
+function decodeTimeline(value) {
+  const data = objectValue(value, "Timeline \u54CD\u5E94");
+  return {
+    sessionId: stringValue(data["sessionId"], "Timeline sessionId"),
+    messages: arrayValue(data["messages"], "Timeline messages").map(decodeMessage),
+    retryableTurns: arrayValue(data["retryableTurns"], "Timeline retryableTurns").map(decodeRetryable),
+    versions: arrayValue(data["versions"], "Timeline versions").map(decodeVersion),
+    undoStack: stringArray(data["undoStack"], "Timeline undoStack"),
+    redoSessionIds: stringArray(data["redoSessionIds"], "Timeline redoSessionIds")
+  };
+}
+function decodeOperationResult(value) {
+  const data = objectValue(value, "\u64CD\u4F5C\u54CD\u5E94");
+  return {
+    sessionId: stringValue(data["sessionId"], "\u64CD\u4F5C sessionId"),
+    queuedTurns: numberValue(data["queuedTurns"], "\u64CD\u4F5C queuedTurns")
+  };
+}
+async function responseValue(response) {
+  const value = await response.json();
+  if (response.ok) return value;
+  const error = objectValue(value, "\u9519\u8BEF\u54CD\u5E94")["error"];
+  throw new Error(typeof error === "string" ? error : `\u8BF7\u6C42\u5931\u8D25\uFF1AHTTP ${String(response.status)}`);
+}
+function conversationRevision(snapshot) {
+  const turnEnds = [...snapshot.turnEnds.entries()].map(([turn, seq]) => `${String(turn)}:${String(seq)}`).join(",");
+  return [snapshot.openState, snapshot.removed, snapshot.hasMore, turnEnds].join("|");
+}
+function lineageRevision(snapshot, sessionId) {
+  let root = sessionId;
+  const ancestorIds = /* @__PURE__ */ new Set();
+  while (!ancestorIds.has(root)) {
+    ancestorIds.add(root);
+    const parent = snapshot.byId[root]?.parentId;
+    if (parent === void 0 || snapshot.byId[parent] === void 0) break;
+    root = parent;
+  }
+  const connected = [];
+  for (const rawId of Object.keys(snapshot.byId).sort()) {
+    const id = rawId;
+    const seen = /* @__PURE__ */ new Set();
+    let cursor = id;
+    while (cursor !== void 0 && !seen.has(cursor)) {
+      if (cursor === root) {
+        connected.push(`${id}>${snapshot.byId[id]?.parentId ?? ""}`);
+        break;
+      }
+      seen.add(cursor);
+      cursor = snapshot.byId[cursor]?.parentId;
+    }
+  }
+  return connected.join("|");
+}
+var MessageEditController = class {
+  constructor(ctx, sessionId) {
+    this.sessionId = sessionId;
+    this.ctx = ctx;
+    this.sessions = ctx.get("sessions");
+    this.face = {
+      hooks: { messageEdit: this.store },
+      acquire: () => {
+        this.users += 1;
+        if (this.users === 1 && this.disposed) this.revive();
+        return () => this.release();
+      },
+      load: () => {
+        void this.load();
+      },
+      edit: (message, text, cascade) => this.mutate({
+        action: "edit",
+        sessionId: this.sessionId,
+        eventSeq: message.eventSeq,
+        blockIndex: message.blockIndex,
+        text,
+        cascade
+      }),
+      retry: (turn, cascade) => this.mutate({
+        action: "retry",
+        sessionId: this.sessionId,
+        turn,
+        cascade
+      }),
+      reroll: () => this.mutate({ action: "reroll", sessionId: this.sessionId }),
+      openVersion: (sessionId2) => this.openWhenListed(sessionId2)
+    };
+    this.observe();
+  }
+  store = (0, import_client.createSnapshotStore)({
+    status: "idle",
+    error: null,
+    pending: null,
+    timeline: null
+  });
+  face;
+  generation = 0;
+  ctx;
+  sessions;
+  sessionSource;
+  sessionSourceDispose;
+  sessionRevision;
+  listRevision = "";
+  refreshScheduled = false;
+  refreshTimer;
+  observing = false;
+  navigationWaits = /* @__PURE__ */ new Set();
+  disposeObservation = void 0;
+  inflight = null;
+  rerunAfter = false;
+  abort = null;
+  disposed = false;
+  users = 0;
+  observe() {
+    this.disposeObservation = this.ctx.effect(
+      () => this.observeDependencies(),
+      `message-edit: observe ${this.sessionId}`
+    );
+  }
+  release() {
+    this.users -= 1;
+    if (this.users <= 0) this.dispose();
+  }
+  /** Tear subscriptions down once no mounted entry uses this controller. */
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.generation += 1;
+    if (this.refreshTimer !== void 0) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = void 0;
+      this.refreshScheduled = false;
+    }
+    this.abort?.abort();
+    this.abort = null;
+    void this.disposeObservation?.();
+    this.disposeObservation = void 0;
+  }
+  /** Re-observe after a transient zero; the retained store keeps old data
+   * until the immediate refetch below commits. */
+  revive() {
+    this.disposed = false;
+    this.observe();
+    this.refresh();
+  }
+  /** Bind to replaceable value sources instead of retaining a Session object. */
+  observeDependencies() {
+    this.observing = true;
+    this.listRevision = lineageRevision(this.sessions.list.getSnapshot(), this.sessionId);
+    this.bindSessionSource();
+    const disposeList = this.sessions.list.subscribe(() => {
+      const rebound = this.bindSessionSource();
+      const nextRevision = lineageRevision(this.sessions.list.getSnapshot(), this.sessionId);
+      if (nextRevision === this.listRevision && !rebound) return;
+      this.listRevision = nextRevision;
+      this.invalidate();
+    });
+    return () => {
+      this.observing = false;
+      this.generation += 1;
+      disposeList();
+      this.sessionSourceDispose?.();
+      this.sessionSourceDispose = void 0;
+      this.sessionSource = void 0;
+      this.sessionRevision = void 0;
+      for (const cancel of [...this.navigationWaits]) cancel();
+    };
+  }
+  bindSessionSource() {
+    const source = this.sessions.binding(this.sessionId)?.session;
+    if (source === this.sessionSource) return false;
+    this.sessionSourceDispose?.();
+    this.sessionSource = source;
+    this.sessionRevision = source === void 0 ? void 0 : conversationRevision(source.getSnapshot());
+    this.sessionSourceDispose = source?.subscribe(() => {
+      if (this.sessionSource !== source) return;
+      const revision = conversationRevision(source.getSnapshot());
+      if (revision === this.sessionRevision) return;
+      this.sessionRevision = revision;
+      this.invalidate();
+    });
+    return true;
+  }
+  invalidate() {
+    if (!this.observing || this.store.getSnapshot().status === "idle" || this.refreshScheduled) return;
+    this.refreshScheduled = true;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = void 0;
+      this.refreshScheduled = false;
+      if (this.observing && this.store.getSnapshot().status !== "idle") this.refresh();
+    }, REFRESH_DELAY_MS);
+  }
+  /** Invalidation-driven refetch: one in-flight request absorbs the demand
+   * and commits a single rerun once it settles. */
+  refresh() {
+    if (this.disposed) return;
+    if (this.inflight !== null) {
+      this.rerunAfter = true;
+      return;
+    }
+    void this.load();
+  }
+  /** Refetch the full value-level projection; concurrent callers share one
+   * request, and an invalidation during flight schedules exactly one rerun. */
+  async load() {
+    if (this.disposed) return;
+    if (this.inflight !== null) return this.inflight;
+    const generation = ++this.generation;
+    this.abort?.abort();
+    const abort = new AbortController();
+    this.abort = abort;
+    this.store.update((state) => {
+      state.status = "loading";
+      state.error = null;
+    });
+    const run = this.performLoad(generation, abort);
+    this.inflight = run;
+    try {
+      await run;
+    } finally {
+      if (this.inflight === run) this.inflight = null;
+      if (this.rerunAfter && !this.disposed) {
+        this.rerunAfter = false;
+        void this.load();
+      }
+    }
+  }
+  async performLoad(generation, abort) {
+    try {
+      const response = await fetch(`${MESSAGE_EDIT_PATH}?sessionId=${encodeURIComponent(this.sessionId)}`, {
+        method: "GET",
+        headers: { accept: "application/json" },
+        cache: "no-store",
+        signal: abort.signal
+      });
+      const timeline = decodeTimeline(await responseValue(response));
+      if (generation !== this.generation) return;
+      this.store.update((state) => {
+        state.status = "ready";
+        state.error = null;
+        state.timeline = timeline;
+      });
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.store.update((state) => {
+        state.status = "error";
+        state.error = messageOf(error);
+      });
+    }
+  }
+  /** Refresh only controllers whose projection has already been requested. */
+  refreshIfLoaded() {
+    if (this.disposed || this.store.getSnapshot().status === "idle") return;
+    this.refresh();
+  }
+  async mutate(operation) {
+    const current = this.store.getSnapshot();
+    if (current.pending !== null || current.status !== "ready") return false;
+    this.store.update((state) => {
+      state.pending = operation.action;
+      state.error = null;
+    });
+    try {
+      const response = await fetch(MESSAGE_EDIT_PATH, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(operation)
+      });
+      const result = decodeOperationResult(await responseValue(response));
+      if (this.disposed) return true;
+      this.store.update((state) => {
+        state.pending = null;
+      });
+      await this.openWhenListed(result.sessionId);
+      return true;
+    } catch (error) {
+      if (this.disposed) return false;
+      this.store.update((state) => {
+        state.pending = null;
+        state.error = messageOf(error);
+      });
+      return false;
+    }
+  }
+  /** Session-list publication is the reactive dependency for navigation. */
+  openWhenListed(sessionId) {
+    if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
+      this.sessions.open(sessionId);
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      let dispose = () => {
+      };
+      const finish = (open) => {
+        if (settled) return;
+        settled = true;
+        dispose();
+        this.navigationWaits.delete(cancel);
+        if (open) this.sessions.open(sessionId);
+        resolve();
+      };
+      const cancel = () => {
+        finish(false);
+      };
+      this.navigationWaits.add(cancel);
+      dispose = this.sessions.list.subscribe(() => {
+        if (this.sessions.list.getSnapshot().byId[sessionId] === void 0) return;
+        finish(true);
+      });
+      if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) finish(true);
+    });
+  }
+};
+
+// src/client/MessageEditHeader.tsx
+var import_react3 = require("react");
+
+// src/client/InlineMessageEdit.tsx
+var import_react2 = require("react");
+function InlineMessageEdit({
+  messages,
+  edit,
+  retry
+}) {
+  (0, import_react2.useEffect)(() => {
+    const cleanups = [];
+    const overlays = createOverlayHost(edit);
+    const userMessages = messages.filter((message) => message.kind === "user");
+    let observer;
+    let alive = true;
+    let frame;
+    let scheduled = false;
+    const sync = () => {
+      const actionRows = Array.from(document.querySelectorAll('[class*="actions"]')).filter((row) => row.closest("[data-turn-tail]") === null);
+      const claimedEvents = /* @__PURE__ */ new Set();
+      for (const row of actionRows) {
+        const marker = row;
+        if (marker.__messageEditInjected === true) {
+          if (marker.__messageEditEventSeq !== void 0) claimedEvents.add(marker.__messageEditEventSeq);
+          continue;
+        }
+        const text = (row.parentElement?.parentElement?.textContent ?? "").trim();
+        if (text.length === 0) continue;
+        const matchingEvents = [...new Set(userMessages.filter((message) => message.text.length > 0 && text.includes(message.text.slice(0, 24))).map((message) => message.eventSeq))];
+        const eventSeq = matchingEvents.find((candidate) => !claimedEvents.has(candidate));
+        if (eventSeq === void 0) continue;
+        const blocks = userMessages.filter((message) => message.eventSeq === eventSeq);
+        if (blocks.length === 0) continue;
+        const previousMarker = marker.__messageEditInjected;
+        const previousEventSeq = marker.__messageEditEventSeq;
+        marker.__messageEditInjected = true;
+        marker.__messageEditEventSeq = eventSeq;
+        claimedEvents.add(eventSeq);
+        const editButton = document.createElement("button");
+        editButton.className = InlineMessageEdit_default["iconButton"];
+        editButton.setAttribute("aria-label", "\u7F16\u8F91\u6D88\u606F");
+        editButton.title = "\u7F16\u8F91\u6D88\u606F";
+        editButton.appendChild(svgIcon(EDIT_PATH));
+        const editMessage = () => {
+          if (blocks.length === 1 && blocks[0] !== void 0) overlays.editBlock(blocks[0]);
+          else overlays.chooseBlock(blocks);
+        };
+        editButton.addEventListener("click", editMessage);
+        const retryButton = document.createElement("button");
+        retryButton.className = InlineMessageEdit_default["iconButton"];
+        retryButton.setAttribute("aria-label", "\u91CD\u8BD5\u6B64\u56DE\u5408");
+        retryButton.title = "\u91CD\u8BD5\u6B64\u56DE\u5408";
+        retryButton.appendChild(svgIcon(REFRESH_PATH));
+        const turn = blocks[0]?.turn;
+        const retryTurn = () => {
+          if (turn !== void 0) void retry(turn, "truncate");
+        };
+        retryButton.addEventListener("click", retryTurn);
+        const officialButtons = Array.from(row.querySelectorAll("button")).filter((button) => button !== editButton && button !== retryButton);
+        const lastOfficial = officialButtons.at(-1);
+        if (lastOfficial !== void 0) {
+          lastOfficial.insertAdjacentElement("afterend", retryButton);
+          lastOfficial.insertAdjacentElement("afterend", editButton);
+        } else {
+          row.appendChild(editButton);
+          row.appendChild(retryButton);
+        }
+        cleanups.push(() => {
+          editButton.removeEventListener("click", editMessage);
+          retryButton.removeEventListener("click", retryTurn);
+          editButton.remove();
+          retryButton.remove();
+          if (previousMarker === void 0) delete marker.__messageEditInjected;
+          else marker.__messageEditInjected = previousMarker;
+          if (previousEventSeq === void 0) delete marker.__messageEditEventSeq;
+          else marker.__messageEditEventSeq = previousEventSeq;
+        });
+      }
+    };
+    sync();
+    observer = new MutationObserver(() => {
+      if (!alive || scheduled) return;
+      scheduled = true;
+      frame = requestAnimationFrame(() => {
+        frame = void 0;
+        scheduled = false;
+        if (alive) sync();
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      alive = false;
+      if (frame !== void 0) cancelAnimationFrame(frame);
+      observer?.disconnect();
+      overlays.dispose();
+      for (const cleanup of cleanups.reverse()) cleanup();
+    };
+  }, [messages, edit, retry]);
+  return null;
+}
+
+// src/client/MessageEditHeader.module.css
+var css2 = ".zgEACG_root{align-items:center;gap:4px;display:inline-flex}.zgEACG_iconButton,.zgEACG_rerollButton{box-sizing:border-box;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:0 0;border:0}.zgEACG_iconButton{border-radius:50%;justify-content:center;align-items:center;width:28px;height:28px;font-size:16px;line-height:20px;display:inline-flex}.zgEACG_rerollButton{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;height:28px;padding:0 10px;font-size:12px;line-height:18px}.zgEACG_iconButton:hover:not(:disabled),.zgEACG_rerollButton:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.zgEACG_iconButton:focus-visible,.zgEACG_rerollButton:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.zgEACG_iconButton:disabled,.zgEACG_rerollButton:disabled{cursor:default;opacity:.4}.zgEACG_counter{min-width:108px;color:var(--dsw-alias-label-tertiary);text-align:center;font-size:11px;line-height:18px}@media (width<=760px){.zgEACG_counter{display:none}}";
+var tagId2 = "dsh-message-edit/MessageEditHeader.module.css";
+if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId2) + "]") === null) {
+  const tag = document.createElement("style");
+  tag.dataset.plugin = "dsh-message-edit";
+  tag.dataset.pluginCss = tagId2;
+  tag.textContent = css2;
+  document.head.appendChild(tag);
+}
+var MessageEditHeader_default = { "iconButton": "zgEACG_iconButton", "counter": "zgEACG_counter", "rerollButton": "zgEACG_rerollButton", "root": "zgEACG_root" };
+
+// src/client/MessageEditHeader.tsx
+var import_jsx_runtime2 = require("react/jsx-runtime");
+function MessageEditHeader({
+  useMessageEdit,
+  acquire,
+  load,
+  openVersion,
+  reroll,
+  edit,
+  retry
+}) {
+  const state = useMessageEdit((value) => value);
+  (0, import_react3.useEffect)(() => {
+    const release = acquire();
+    load();
+    return release;
+  }, [acquire, load]);
+  const timeline = state.timeline;
+  const versions = state.timeline?.versions ?? [];
+  const undoSessionId = timeline?.undoStack[0];
+  const redoSessionId = timeline?.redoSessionIds.at(-1);
+  const effectDepth = timeline?.undoStack.length ?? 0;
+  const busy = state.pending !== null || state.status !== "ready";
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+      InlineMessageEdit,
+      {
+        messages: state.status === "ready" && state.pending === null ? timeline?.messages ?? [] : [],
+        edit,
+        retry
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: MessageEditHeader_default["root"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "button",
+        {
+          type: "button",
+          className: MessageEditHeader_default["iconButton"],
+          "aria-label": "\u64A4\u9500\u5F53\u524D\u7248\u672C\u6548\u679C",
+          title: "\u64A4\u9500\u5F53\u524D\u6548\u679C\uFF0C\u4FDD\u7559\u66F4\u65E9\u6548\u679C",
+          disabled: undoSessionId === void 0 || busy,
+          onClick: () => {
+            if (undoSessionId !== void 0) void openVersion(undoSessionId);
+          },
+          children: "\u2190"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: MessageEditHeader_default["counter"], children: versions.length === 0 ? "\u6548\u679C \u2014" : `\u6548\u679C ${String(effectDepth)} \u5C42 \xB7 ${String(versions.length)} \u7248` }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "button",
+        {
+          type: "button",
+          className: MessageEditHeader_default["iconButton"],
+          "aria-label": "\u91CD\u65BD\u52A0\u4E0B\u4E00\u7248\u672C\u6548\u679C",
+          title: timeline !== null && timeline.redoSessionIds.length > 1 ? `\u91CD\u65BD\u52A0\u6700\u65B0\u6548\u679C\uFF08\u53E6\u6709 ${String(timeline.redoSessionIds.length - 1)} \u4E2A\u5206\u652F\uFF09` : "\u91CD\u65BD\u52A0\u4E0B\u4E00\u6548\u679C",
+          disabled: redoSessionId === void 0 || busy,
+          onClick: () => {
+            if (redoSessionId !== void 0) void openVersion(redoSessionId);
+          },
+          children: "\u2192"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "button",
+        {
+          type: "button",
+          className: MessageEditHeader_default["rerollButton"],
+          disabled: busy || state.timeline === null,
+          onClick: () => {
+            void reroll();
+          },
+          children: state.pending === "reroll" ? "\u6B63\u5728\u91CD\u751F\u6210\u2026" : "\u91CD\u751F\u6210"
+        }
+      )
+    ] })
+  ] });
+}
+
+// src/client/MessageEditTimelineView.tsx
+var import_react4 = require("react");
+
+// src/client/MessageEditTimelineView.module.css
+var css3 = ".b5lgga_root{box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);padding:24px;overflow:auto}.b5lgga_pageHeader{justify-content:space-between;align-items:flex-start;gap:20px;max-width:1480px;margin:0 auto 16px;display:flex}.b5lgga_title,.b5lgga_intro,.b5lgga_subtitle,.b5lgga_notice,.b5lgga_error,.b5lgga_empty,.b5lgga_turnTitle,.b5lgga_turnPreview,.b5lgga_messageText{margin:0}.b5lgga_title{font-size:22px;font-weight:600;line-height:30px}.b5lgga_intro{max-width:700px;color:var(--dsw-alias-label-tertiary);margin-top:4px;font-size:13px;line-height:20px}.b5lgga_headerActions{flex:none;align-items:flex-end;gap:8px;display:flex}.b5lgga_cascadeField{color:var(--dsw-alias-label-secondary);flex-direction:column;gap:4px;font-size:11px;line-height:16px;display:flex}.b5lgga_select,.b5lgga_textarea,.b5lgga_primaryButton,.b5lgga_secondaryButton,.b5lgga_textButton,.b5lgga_versionButton{box-sizing:border-box;font:inherit}.b5lgga_select,.b5lgga_textarea{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border-radius:8px}.b5lgga_select{height:34px;padding:0 30px 0 9px;font-size:12px}.b5lgga_primaryButton,.b5lgga_secondaryButton,.b5lgga_textButton,.b5lgga_versionButton{cursor:pointer;border:0}.b5lgga_primaryButton,.b5lgga_secondaryButton{border-radius:17px;justify-content:center;align-items:center;min-height:34px;padding:0 13px;font-size:12px;line-height:18px;display:inline-flex}.b5lgga_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill)}.b5lgga_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}.b5lgga_secondaryButton{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.b5lgga_secondaryButton:hover:not(:disabled),.b5lgga_textButton:hover:not(:disabled),.b5lgga_versionButton:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}.b5lgga_primaryButton:disabled,.b5lgga_secondaryButton:disabled,.b5lgga_textButton:disabled,.b5lgga_versionButton:disabled,.b5lgga_select:disabled{cursor:default;opacity:.45}.b5lgga_primaryButton:focus-visible,.b5lgga_secondaryButton:focus-visible,.b5lgga_textButton:focus-visible,.b5lgga_versionButton:focus-visible,.b5lgga_select:focus-visible,.b5lgga_textarea:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}.b5lgga_notice,.b5lgga_error{max-width:1480px;margin:0 auto 10px;font-size:12px;line-height:18px}.b5lgga_notice{color:var(--dsw-alias-state-warn-label)}.b5lgga_error{color:var(--dsw-alias-state-error-primary)}.b5lgga_status{box-sizing:border-box;width:100%;height:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;align-items:flex-start;gap:12px;padding:24px;display:flex}.b5lgga_status .b5lgga_error{margin:0}.b5lgga_columns{grid-template-columns:minmax(280px,.72fr) minmax(520px,1.75fr);align-items:start;gap:18px;max-width:1480px;margin:0 auto;display:grid}.b5lgga_versionsPanel,.b5lgga_turnsPanel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;min-width:0;padding:16px}.b5lgga_versionsPanel{position:sticky;top:0}.b5lgga_sectionHeading{justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;display:flex}.b5lgga_effectControls{background:var(--dsw-alias-bg-module-platform);border-radius:9px;flex-direction:column;gap:8px;margin-bottom:12px;padding:10px;display:flex}.b5lgga_effectDepth{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:17px}.b5lgga_effectButtons{flex-wrap:wrap;gap:6px;display:flex}.b5lgga_effectButtons .b5lgga_secondaryButton{min-height:28px;padding:0 10px;font-size:11px}.b5lgga_subtitle{font-size:16px;font-weight:500;line-height:24px}.b5lgga_count{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.b5lgga_versionList,.b5lgga_turnList{margin:0;padding:0;list-style:none}.b5lgga_versionList{flex-direction:column;gap:4px;display:flex}.b5lgga_versionItem{--message-edit-depth:0;padding-left:calc(var(--message-edit-depth) * 14px);position:relative}.b5lgga_versionButton{width:100%;min-width:0;color:var(--dsw-alias-label-secondary);text-align:left;background:0 0;border-radius:9px;align-items:flex-start;gap:9px;padding:9px;display:flex;position:relative}.b5lgga_versionButton[data-current]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);opacity:1}.b5lgga_versionButton:not([data-current]) .b5lgga_pathBadge{opacity:.8}.b5lgga_versionLine{background:var(--dsw-alias-border-l2);width:1px;position:absolute;top:0;bottom:0;left:14px}.b5lgga_versionDot{z-index:1;border:2px solid var(--dsw-alias-bg-layer-1);background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:7px;height:7px;margin-top:6px}.b5lgga_versionButton[data-current] .b5lgga_versionDot{border-color:var(--dsw-alias-bg-module-platform);background:var(--dsw-alias-brand-primary)}.b5lgga_versionMain{flex-direction:column;flex:1;min-width:0;display:flex}.b5lgga_versionTitle{text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;line-height:20px;overflow:hidden}.b5lgga_versionMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:16px;overflow:hidden}.b5lgga_versionDiff{color:var(--dsw-alias-label-tertiary);flex-direction:column;gap:2px;margin-top:5px;font-size:10px;line-height:15px;display:flex}.b5lgga_versionDiff span{-webkit-line-clamp:2;white-space:pre-wrap;overflow-wrap:anywhere;-webkit-box-orient:vertical;display:-webkit-box;overflow:hidden}.b5lgga_currentBadge,.b5lgga_pathBadge,.b5lgga_kindBadge{border-radius:9px;flex:none;padding:1px 6px;font-size:10px;line-height:17px}.b5lgga_currentBadge{color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1)}.b5lgga_pathBadge{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}.b5lgga_turnList{flex-direction:column;gap:14px;display:flex}.b5lgga_turnSection{border:1px solid var(--dsw-alias-border-l2);border-radius:11px;padding:13px}.b5lgga_turnHeader,.b5lgga_messageHeader,.b5lgga_editorActions{justify-content:space-between;align-items:center;gap:10px;display:flex}.b5lgga_turnHeader{border-bottom:1px solid var(--dsw-alias-border-l2);align-items:flex-start;padding-bottom:11px}.b5lgga_turnTitle{font-size:14px;font-weight:500;line-height:22px}.b5lgga_turnPreview{max-width:700px;color:var(--dsw-alias-label-tertiary);-webkit-line-clamp:2;white-space:pre-wrap;-webkit-box-orient:vertical;font-size:11px;line-height:17px;display:-webkit-box;overflow:hidden}.b5lgga_messageList{flex-direction:column;gap:8px;margin-top:10px;display:flex}.b5lgga_messageCard{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:10px}.b5lgga_messageHeader{justify-content:flex-start}.b5lgga_kindBadge{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1)}.b5lgga_kindBadge[data-kind=assistant\\.reasoning]{color:var(--dsw-alias-label-tertiary)}.b5lgga_messageTime{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:17px}.b5lgga_textButton{color:var(--dsw-alias-label-secondary);background:0 0;border-radius:12px;margin-left:auto;padding:3px 8px;font-size:11px;line-height:17px}.b5lgga_messageText{max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin-top:7px;font-family:inherit;font-size:12px;line-height:19px;overflow:auto}.b5lgga_editor{margin-top:8px}.b5lgga_textarea{resize:vertical;width:100%;min-height:120px;padding:9px;font-size:12px;line-height:19px}.b5lgga_editorActions{margin-top:8px}.b5lgga_editorHint{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}.b5lgga_empty{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:10px;padding:18px;font-size:13px;line-height:20px}@media (width<=1000px){.b5lgga_columns{grid-template-columns:1fr}.b5lgga_versionsPanel{position:static}@media (width<=680px){.b5lgga_root{padding:16px}.b5lgga_pageHeader,.b5lgga_headerActions,.b5lgga_turnHeader,.b5lgga_editorActions{flex-direction:column;align-items:stretch}.b5lgga_headerActions,.b5lgga_primaryButton,.b5lgga_secondaryButton{width:100%}}}";
+var tagId3 = "dsh-message-edit/MessageEditTimelineView.module.css";
+if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId3) + "]") === null) {
+  const tag = document.createElement("style");
+  tag.dataset.plugin = "dsh-message-edit";
+  tag.dataset.pluginCss = tagId3;
+  tag.textContent = css3;
+  document.head.appendChild(tag);
+}
+var MessageEditTimelineView_default = { "currentBadge": "b5lgga_currentBadge", "title": "b5lgga_title", "versionMain": "b5lgga_versionMain", "textarea": "b5lgga_textarea", "editorActions": "b5lgga_editorActions", "messageList": "b5lgga_messageList", "primaryButton": "b5lgga_primaryButton", "textButton": "b5lgga_textButton", "sectionHeading": "b5lgga_sectionHeading", "turnList": "b5lgga_turnList", "versionDot": "b5lgga_versionDot", "secondaryButton": "b5lgga_secondaryButton", "empty": "b5lgga_empty", "versionButton": "b5lgga_versionButton", "headerActions": "b5lgga_headerActions", "versionItem": "b5lgga_versionItem", "cascadeField": "b5lgga_cascadeField", "turnsPanel": "b5lgga_turnsPanel", "turnSection": "b5lgga_turnSection", "kindBadge": "b5lgga_kindBadge", "versionsPanel": "b5lgga_versionsPanel", "subtitle": "b5lgga_subtitle", "root": "b5lgga_root", "pageHeader": "b5lgga_pageHeader", "notice": "b5lgga_notice", "turnTitle": "b5lgga_turnTitle", "columns": "b5lgga_columns", "versionList": "b5lgga_versionList", "versionTitle": "b5lgga_versionTitle", "versionMeta": "b5lgga_versionMeta", "versionDiff": "b5lgga_versionDiff", "turnHeader": "b5lgga_turnHeader", "messageCard": "b5lgga_messageCard", "count": "b5lgga_count", "effectDepth": "b5lgga_effectDepth", "messageTime": "b5lgga_messageTime", "effectControls": "b5lgga_effectControls", "effectButtons": "b5lgga_effectButtons", "editorHint": "b5lgga_editorHint", "status": "b5lgga_status", "pathBadge": "b5lgga_pathBadge", "error": "b5lgga_error", "turnPreview": "b5lgga_turnPreview", "select": "b5lgga_select", "versionLine": "b5lgga_versionLine", "intro": "b5lgga_intro", "messageHeader": "b5lgga_messageHeader", "messageText": "b5lgga_messageText", "editor": "b5lgga_editor" };
+
+// src/client/MessageEditTimelineView.tsx
+var import_jsx_runtime3 = require("react/jsx-runtime");
+var BLOCK_LABEL = {
+  user: "\u7528\u6237\u6D88\u606F",
+  "assistant.reasoning": "\u52A9\u624B\u601D\u8003",
+  "assistant.response": "\u52A9\u624B\u56DE\u590D"
+};
+var OPERATION_LABEL = {
+  edit: "\u7F16\u8F91",
+  reroll: "\u91CD\u751F\u6210",
+  retry: "\u91CD\u8BD5"
+};
+function timeLabel(value) {
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+function turnSections(turns, messages) {
+  return turns.map((retry) => ({
+    retry,
+    messages: messages.filter((message) => message.turn === retry.turn)
+  }));
+}
+function VersionRow({ version, disabled, onOpen }) {
+  const depthStyle = { "--message-edit-depth": String(version.depth) };
+  const operation = version.operation === void 0 ? version.parentSessionId === void 0 ? "\u539F\u59CB\u7248\u672C" : "\u5916\u90E8\u5206\u652F" : OPERATION_LABEL[version.operation];
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("li", { className: MessageEditTimelineView_default["versionItem"], style: depthStyle, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+    "button",
+    {
+      type: "button",
+      className: MessageEditTimelineView_default["versionButton"],
+      "data-current": version.current || void 0,
+      disabled: version.current || disabled,
+      onClick: () => {
+        onOpen(version.sessionId);
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["versionLine"], "aria-hidden": true }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["versionDot"], "aria-hidden": true }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: MessageEditTimelineView_default["versionMain"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: MessageEditTimelineView_default["versionTitle"], children: [
+            operation,
+            version.targetTurn === void 0 ? null : ` \xB7 \u56DE\u5408 ${String(version.targetTurn)}`
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: MessageEditTimelineView_default["versionMeta"], children: [
+            timeLabel(version.createdAt),
+            " \xB7 ",
+            version.sessionId.slice(0, 12)
+          ] }),
+          version.before === void 0 && version.after === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: MessageEditTimelineView_default["versionDiff"], children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { children: [
+              "\u539F\uFF1A",
+              version.before || "\uFF08\u7A7A\uFF09"
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { children: [
+              "\u65B0\uFF1A",
+              version.after || "\uFF08\u7A7A\uFF09"
+            ] })
+          ] })
+        ] }),
+        version.current ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["currentBadge"], children: "\u5F53\u524D" }) : version.onCurrentEffectPath ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["pathBadge"], children: "\u94FE\u4E0A" }) : null
+      ]
+    }
+  ) });
+}
+function MessageCard({
+  message,
+  editing,
+  disabled,
+  cascade,
+  onBeginEdit,
+  onCancelEdit,
+  onTextChange,
+  onApplyEdit
+}) {
+  const active = editing?.message.key === message.key;
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("article", { className: MessageEditTimelineView_default["messageCard"], children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["messageHeader"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["kindBadge"], "data-kind": message.kind, children: BLOCK_LABEL[message.kind] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["messageTime"], children: timeLabel(message.time) }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+        "button",
+        {
+          type: "button",
+          className: MessageEditTimelineView_default["textButton"],
+          disabled,
+          onClick: () => {
+            active ? onCancelEdit() : onBeginEdit(message);
+          },
+          children: active ? "\u53D6\u6D88" : "\u7F16\u8F91"
+        }
+      )
+    ] }),
+    active && editing !== null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["editor"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+        "textarea",
+        {
+          className: MessageEditTimelineView_default["textarea"],
+          value: editing.text,
+          rows: 6,
+          autoFocus: true,
+          onChange: (event) => {
+            onTextChange(event.currentTarget.value);
+          }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["editorActions"], children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["editorHint"], children: "\u5C06\u4ECE\u8BE5\u56DE\u5408\u4E4B\u524D\u5206\u652F\uFF0C\u539F\u7248\u672C\u4FDD\u6301\u4E0D\u53D8\u3002" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "button",
+          {
+            type: "button",
+            className: MessageEditTimelineView_default["primaryButton"],
+            disabled,
+            onClick: () => {
+              onApplyEdit(message, editing.text, cascade);
+            },
+            children: "\u5E94\u7528\u5E76\u91CD\u751F\u6210"
+          }
+        )
+      ] })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: MessageEditTimelineView_default["messageText"], children: message.text || "\uFF08\u7A7A\u5185\u5BB9\uFF09" })
+  ] });
+}
+function MessageEditTimelineView({
+  useMessageEdit,
+  acquire,
+  load,
+  edit,
+  retry,
+  reroll,
+  openVersion
+}) {
+  const state = useMessageEdit((value) => value);
+  const [cascade, setCascade] = (0, import_react4.useState)("truncate");
+  const [editing, setEditing] = (0, import_react4.useState)(null);
+  (0, import_react4.useEffect)(() => {
+    const release = acquire();
+    load();
+    return release;
+  }, [acquire, load]);
+  const timeline = state.timeline;
+  const sections = (0, import_react4.useMemo)(
+    () => timeline === null ? [] : turnSections(timeline.retryableTurns, timeline.messages),
+    [timeline]
+  );
+  const busy = state.pending !== null || state.status !== "ready";
+  (0, import_react4.useEffect)(() => {
+    setEditing((current) => {
+      if (current === null || timeline === null) return current;
+      return timeline.messages.some((message) => message.key === current.message.key) ? current : null;
+    });
+  }, [timeline]);
+  if (timeline === null && (state.status === "idle" || state.status === "loading")) {
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: MessageEditTimelineView_default["status"], children: "\u6B63\u5728\u8F7D\u5165\u6D88\u606F\u65F6\u95F4\u7EBF\u2026" });
+  }
+  if (timeline === null && state.status === "error") {
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["status"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["error"], children: state.error }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: MessageEditTimelineView_default["secondaryButton"], onClick: load, children: "\u91CD\u65B0\u8F7D\u5165" })
+    ] });
+  }
+  if (timeline === null) return null;
+  const applyEdit = (message, text, policy) => {
+    setEditing(null);
+    void edit(message, text, policy);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["root"], children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("header", { className: MessageEditTimelineView_default["pageHeader"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h1", { className: MessageEditTimelineView_default["title"], children: "\u6D88\u606F\u7F16\u8F91\u4E0E\u91CD\u751F\u6210" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["intro"], children: "\u6BCF\u6B21\u4FEE\u6539\u90FD\u4F1A\u4E0E\u5176\u6062\u590D\u7248\u672C\u6210\u5BF9\u8BB0\u5F55\uFF1B\u56DE\u5408\u53CA\u5176\u5B8C\u6574\u5DE5\u5177\u94FE\u4F5C\u4E3A\u4E00\u4E2A\u6574\u4F53\u91CD\u65B0\u8BA1\u7B97\u3002" })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["headerActions"], children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: MessageEditTimelineView_default["cascadeField"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: "\u540E\u7EED\u7B56\u7565" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+            "select",
+            {
+              className: MessageEditTimelineView_default["select"],
+              value: cascade,
+              disabled: busy,
+              onChange: (event) => {
+                setCascade(event.currentTarget.value);
+              },
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("option", { value: "truncate", children: "\u622A\u65AD\u540E\u7EED\uFF08\u9ED8\u8BA4\uFF09" }),
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("option", { value: "preserve", children: "\u4FDD\u7559\u8F93\u5165\u5E76\u91CD\u751F\u6210\u540E\u7EED" })
+              ]
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "button",
+          {
+            type: "button",
+            className: MessageEditTimelineView_default["primaryButton"],
+            disabled: busy,
+            onClick: () => {
+              void reroll();
+            },
+            children: state.pending === "reroll" ? "\u6B63\u5728\u91CD\u751F\u6210\u2026" : "\u91CD\u751F\u6210\u6700\u540E\u56DE\u590D"
+          }
+        )
+      ] })
+    ] }),
+    state.error === null ? null : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["error"], children: state.error }),
+    state.status === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["notice"], children: "\u6B63\u5728\u5237\u65B0\u65F6\u95F4\u7EBF\u2026" }) : null,
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["columns"], children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("aside", { className: MessageEditTimelineView_default["versionsPanel"], "aria-label": "\u7248\u672C\u65F6\u95F4\u7EBF", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["sectionHeading"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { className: MessageEditTimelineView_default["subtitle"], children: "\u7248\u672C\u65F6\u95F4\u7EBF" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["count"], children: String(timeline.versions.length) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["effectControls"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: MessageEditTimelineView_default["effectDepth"], children: [
+            "\u5F53\u524D\u6548\u679C\u94FE ",
+            String(timeline.undoStack.length),
+            " \u5C42"
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["effectButtons"], children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+              "button",
+              {
+                type: "button",
+                className: MessageEditTimelineView_default["secondaryButton"],
+                disabled: busy || timeline.undoStack[0] === void 0,
+                onClick: () => {
+                  const target = timeline.undoStack[0];
+                  if (target !== void 0) void openVersion(target);
+                },
+                children: "\u64A4\u9500\u5F53\u524D\u6548\u679C"
+              }
+            ),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+              "button",
+              {
+                type: "button",
+                className: MessageEditTimelineView_default["secondaryButton"],
+                disabled: busy || timeline.redoSessionIds.length === 0,
+                onClick: () => {
+                  const target = timeline.redoSessionIds.at(-1);
+                  if (target !== void 0) void openVersion(target);
+                },
+                children: timeline.redoSessionIds.length > 1 ? `\u91CD\u65BD\u52A0\u6700\u65B0\u5206\u652F\uFF08${String(timeline.redoSessionIds.length)}\uFF09` : "\u91CD\u65BD\u52A0\u4E0B\u4E00\u6548\u679C"
+              }
+            )
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("ol", { className: MessageEditTimelineView_default["versionList"], children: timeline.versions.map((version) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          VersionRow,
+          {
+            version,
+            disabled: busy,
+            onOpen: (sessionId) => {
+              void openVersion(sessionId);
+            }
+          },
+          version.sessionId
+        )) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("main", { className: MessageEditTimelineView_default["turnsPanel"], children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["sectionHeading"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { className: MessageEditTimelineView_default["subtitle"], children: "\u5DF2\u843D\u5B9A\u6D88\u606F" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: MessageEditTimelineView_default["count"], children: String(timeline.messages.length) })
+        ] }),
+        sections.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["empty"], children: "\u5F53\u524D\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u53EF\u7F16\u8F91\u7684\u5DF2\u843D\u5B9A\u56DE\u5408\u3002" }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("ol", { className: MessageEditTimelineView_default["turnList"], children: sections.map((section) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("li", { className: MessageEditTimelineView_default["turnSection"], children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: MessageEditTimelineView_default["turnHeader"], children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("h3", { className: MessageEditTimelineView_default["turnTitle"], children: [
+                "\u56DE\u5408 ",
+                String(section.retry.turn)
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: MessageEditTimelineView_default["turnPreview"], children: section.retry.preview || "\uFF08\u7A7A\u7528\u6237\u8F93\u5165\uFF09" })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+              "button",
+              {
+                type: "button",
+                className: MessageEditTimelineView_default["secondaryButton"],
+                disabled: busy,
+                onClick: () => {
+                  void retry(section.retry.turn, cascade);
+                },
+                children: state.pending === "retry" ? "\u6B63\u5728\u91CD\u8BD5\u2026" : "\u91CD\u8BD5\u6B64\u56DE\u5408"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: MessageEditTimelineView_default["messageList"], children: section.messages.map((message) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            MessageCard,
+            {
+              message,
+              editing,
+              disabled: busy,
+              cascade,
+              onBeginEdit: (value) => {
+                setEditing({ message: value, text: value.text });
+              },
+              onCancelEdit: () => {
+                setEditing(null);
+              },
+              onTextChange: (text) => {
+                setEditing((current) => current === null ? null : { ...current, text });
+              },
+              onApplyEdit: applyEdit
+            },
+            message.key
+          )) })
+        ] }, section.retry.turn)) })
+      ] })
+    ] })
+  ] });
+}
+
+// src/client/index.ts
+var inject = ["slots", "conversation", "connection", "sessions"];
+function apply(ctx) {
+  const controllers = /* @__PURE__ */ new Map();
+  const controllerFor = (sessionId) => {
+    let controller = controllers.get(sessionId);
+    if (controller === void 0) {
+      controller = new MessageEditController(ctx, sessionId);
+      controllers.set(sessionId, controller);
+    }
+    return controller;
+  };
+  ctx.on("connection/reset", () => {
+    for (const controller of controllers.values()) controller.refreshIfLoaded();
+  });
+  ctx.slots.register({
+    name: "conversation.view",
+    id: "message-edit-timeline",
+    order: MESSAGE_EDIT_VIEW_ORDER,
+    label: "Timeline",
+    inject: (sessionId) => controllerFor(sessionId).face
+  }, MessageEditTimelineView);
+  ctx.slots.register({
+    name: "conversation.session.header.actions",
+    id: "message-edit-controls",
+    order: MESSAGE_EDIT_VIEW_ORDER,
+    inject: (sessionId) => controllerFor(sessionId).face
+  }, MessageEditHeader);
+  ctx.slots.register({
+    name: "conversation.chat.assistant-actions",
+    id: "message-edit-assistant-actions",
+    order: MESSAGE_EDIT_VIEW_ORDER,
+    inject: (sessionId) => controllerFor(sessionId).face
+  }, AssistantMessageActions);
+}
+return module.exports; } });
 //# sourceMappingURL=client.js.map

@@ -1,0 +1,9 @@
+.root{align-items:center;gap:4px;display:inline-flex}
+.iconButton,.rerollButton{box-sizing:border-box;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:0 0;border:0}
+.iconButton{border-radius:50%;justify-content:center;align-items:center;width:28px;height:28px;font-size:16px;line-height:20px;display:inline-flex}
+.rerollButton{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;height:28px;padding:0 10px;font-size:12px;line-height:18px}
+.iconButton:hover:not(:disabled),.rerollButton:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.iconButton:focus-visible,.rerollButton:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3);outline:none}
+.iconButton:disabled,.rerollButton:disabled{cursor:default;opacity:.4}
+.counter{min-width:108px;color:var(--dsw-alias-label-tertiary);text-align:center;font-size:11px;line-height:18px}
+@media (width<=760px){.counter{display:none}
